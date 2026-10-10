@@ -1,12 +1,12 @@
 # Overnight state (live; update after every meaningful step)
 
 ## Now
-- Window B (04:45-): M2-M5 DONE, M6 docs DONE (README, docs/design.md, docs/threat-model.md, docs/api.md).
-  **From-scratch install (helm uninstall + delete ns + `bash scripts/up.sh --no-build`, 48 s) then
-  `bash scripts/demo-check.sh` = 25/25 PASS (05:13).** `scripts/ui-check.mjs` (headless Edge) = no console/network errors.
-  Claude Code 2.1.296 connected with URL + key only and ran a cross-server prompt (store + demo).
-- Stand-outs done: S-2 per-tool access; S-6 partial (SSRF guard, sealed credentials, NetworkPolicies, RBAC, non-root).
-- Next: tool-definition pinning (rug-pull quarantine), per-key rate limit, /metrics, docs/demo-script.md for the video.
+- Window B (04:45-): M2-M6 DONE. `bash scripts/demo-check.sh` = **32/32** on 2 gateway replicas (05:22);
+  from-scratch install verified 05:13; `scripts/ui-check.mjs` clean; Claude Code 2.1.296 verified.
+- Stand-outs done: S-2 per-tool access; rug-pull pinning/quarantine; S-6 partial (SSRF guard, sealed credentials,
+  NetworkPolicies, RBAC, non-root); scaling (2 replicas, LISTEN/NOTIFY, per-key rate limit).
+- Docs: README, docs/design.md, docs/threat-model.md, docs/api.md, docs/demo-script.md.
+- Next: verify rate limit 429 + helm rollback; observability (/metrics + per-server stats); MORNING-REPORT at 07:00.
 
 ## Done
 - git repo initialised (`main`), `.gitignore`, `.claude/settings.local.json` (broad allow + deny list).
