@@ -18,7 +18,8 @@ export function serverView(u: Upstream) {
     id: u.id, slug: u.slug, name: u.name, url: u.url, enabled: u.enabled, status: u.status, era: u.era,
     protocolVersion: u.protocolVersion, lastError: u.lastError, statusSince: u.statusSince.toISOString(),
     timeoutMs: u.timeoutMs, hasCredential: !!u.credential, authHeader: u.authHeader,
-    tools: u.tools.map((t) => ({ name: t.name, gatewayName: `${u.slug}__${t.name}`, title: t.title, description: t.description, annotations: t.annotations, inputSchema: t.inputSchema, access: u.access.get(t.name) ?? 'member' })),
+    tools: u.tools.map((t) => ({ name: t.name, gatewayName: `${u.slug}__${t.name}`, title: t.title, description: t.description, annotations: t.annotations, inputSchema: t.inputSchema, access: u.access.get(t.name) ?? 'member',
+      changed: u.changed.has(t.name), approvedDescription: u.changed.has(t.name) ? u.pins.get(t.name)?.description ?? null : undefined })),
   };
 }
 
@@ -127,6 +128,12 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     const b = await body(c, z.object({ access: z.enum(['member', 'admin', 'off']) }));
     if (b instanceof Response) return b;
     await mgr.setAccess(u, c.req.param('tool'), b.access);
+    return c.json(serverView(u));
+  });
+  api.post('/servers/:id/tools/:tool/approve', admin, async (c) => {
+    const u = mgr.ups.get(Number(c.req.param('id')));
+    if (!u) return bad(c, 404, 'no such server');
+    if (!(await mgr.approveTool(u, c.req.param('tool')))) return bad(c, 404, 'no such tool');
     return c.json(serverView(u));
   });
   api.get('/servers/:id/events', async (c) =>

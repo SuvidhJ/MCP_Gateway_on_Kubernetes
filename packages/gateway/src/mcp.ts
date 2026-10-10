@@ -59,6 +59,9 @@ export function createGatewayMcp(mgr: UpstreamManager) {
       if (!u || (u.client && !u.tools.some((t) => t.name === tool))) {
         outcome = 'unknown_tool';
         result = errResult(`Tool ${full} does not exist on this gateway.`);
+      } else if (u.changed.has(tool)) {
+        outcome = 'quarantined';
+        result = errResult(`${full} changed its definition since an admin approved it, so it is disabled until an admin reviews the change.`);
       } else if (!allowed(p, u, tool)) {
         outcome = 'denied';
         result = errResult(mgr.accessOf(u, tool) === 'off' ? `${full} is turned off by an administrator.` : `${full} is restricted to admins; your role is "${p.role}".`);

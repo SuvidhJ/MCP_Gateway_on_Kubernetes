@@ -22,6 +22,9 @@ export interface Tool {
   inputSchema?: unknown;
   /** Who may see and call it through the gateway: everyone, admins only, or nobody. */
   access: ToolAccess;
+  /** The upstream changed this tool's definition since it was approved: hidden from clients until re-approved. */
+  changed?: boolean;
+  approvedDescription?: string | null;
 }
 export type ToolAccess = 'member' | 'admin' | 'off';
 export interface Server {

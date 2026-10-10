@@ -80,7 +80,10 @@ function ServerRow({ server: s, admin }: { server: Server; admin: boolean }) {
           {s.era ? <Badge tone="blue">{s.era}</Badge> : <span className="muted">—</span>}
           {s.protocolVersion && <div className="sub">{s.protocolVersion}</div>}
         </td>
-        <td className="num">{s.tools.length}</td>
+        <td className="num">
+          {s.tools.length}
+          {s.tools.some((t) => t.changed) && <div><Badge tone="red" title="A tool changed its definition">review</Badge></div>}
+        </td>
         <td><Time iso={s.statusSince} relative /></td>
         <td className="err-cell" title={s.lastError ?? undefined}>{s.lastError ?? <span className="muted">—</span>}</td>
         {admin && (
@@ -121,16 +124,32 @@ function ToolList({ server, admin }: { server: Server; admin: boolean }) {
   const tools: Tool[] = server.tools;
   const setAccess = useAction(({ tool, access }: { tool: string; access: ToolAccess }) =>
     api(`/api/servers/${server.id}/tools/${encodeURIComponent(tool)}/access`, { method: 'PUT', body: { access } }), [SERVERS]);
+  const approve = useAction((tool: string) =>
+    api(`/api/servers/${server.id}/tools/${encodeURIComponent(tool)}/approve`, { method: 'POST' }), [SERVERS]);
   if (tools.length === 0) return <p className="muted">No tools (server not connected or exposes none).</p>;
   return (
     <table className="inner">
       <thead><tr><th>Gateway name</th><th>Description</th><th>Hints</th><th title="Restricted tools are hidden from tools/list and rejected if called">Access</th></tr></thead>
       <tbody>
-        {setAccess.error && <tr><td colSpan={4}><ErrorText error={setAccess.error} /></td></tr>}
+        {(setAccess.error || approve.error) && <tr><td colSpan={4}><ErrorText error={setAccess.error ?? approve.error} /></td></tr>}
         {tools.map((t) => (
           <tr key={t.gatewayName}>
             <td><code>{t.gatewayName}</code>{t.title && <div className="sub">{t.title}</div>}</td>
-            <td className="desc">{t.description ?? <span className="muted">—</span>}</td>
+            <td className="desc">
+              {t.changed && (
+                <div className="changed">
+                  <Badge tone="red" title="Hidden from clients and the chat until an admin approves the new definition">definition changed</Badge>
+                  <div className="sub">Approved: {t.approvedDescription ?? '—'}</div>
+                  <div className="sub">Now:</div>
+                </div>
+              )}
+              {t.description ?? <span className="muted">—</span>}
+              {t.changed && admin && (
+                <div><button className="btn btn-small" disabled={approve.isPending}
+                  onClick={() => { if (confirm(`Approve the new definition of ${t.gatewayName}? Clients will see it again.`)) approve.mutate(t.name); }}>
+                  Approve change</button></div>
+              )}
+            </td>
             <td className="chips">
               {t.annotations?.readOnlyHint && <Badge tone="green">read-only</Badge>}
               {t.annotations?.destructiveHint && <Badge tone="red">destructive</Badge>}

@@ -4,6 +4,7 @@
 //   soft = timeouts -> a strike; `strikes` consecutive strikes -> unreachable
 //   auth = 401/403 -> auth_failed (an admin must fix the credential)
 // After a failure the loop re-probes fast (250 ms doubling up to the tick) so a restarted pod is back in ~2 s.
+import crypto from 'node:crypto';
 import { Client, StreamableHTTPClientTransport, SdkHttpError, SdkError } from '@modelcontextprotocol/client';
 import { fetch as undiciFetch } from 'undici';
 import { config } from './config.js';
@@ -23,6 +24,8 @@ export interface Upstream {
   enabled: boolean; timeoutMs: number | null;
   status: Status; era: 'modern' | 'legacy' | null; protocolVersion: string | null; lastError: string | null;
   statusSince: Date; tools: ToolDef[]; access: Map<string, Access>;
+  /** Pinned definitions (rug-pull defence) and the tools whose current definition differs from the pin. */
+  pins: Map<string, { hash: string; description: string | null }>; changed: Set<string>;
   client?: Client; sessionId?: string; strikes: number; retryMs: number; timer?: NodeJS.Timeout;
   busy: boolean; again: boolean; removed: boolean;
 }
@@ -47,6 +50,10 @@ export function classify(e: any): 'auth' | 'hard' | 'soft' | 'other' {
   if (/timed? ?out|TimeoutError|REQUEST_TIMEOUT|AbortError/i.test(String(e?.name) + String(e?.message) + String(e?.code))) return 'soft';
   return 'other';
 }
+/** Fingerprint of everything a model reads about a tool. */
+export const toolHash = (t: ToolDef) => crypto.createHash('sha256')
+  .update(JSON.stringify([t.title ?? null, t.description ?? '', t.inputSchema ?? null, t.annotations ?? null])).digest('hex');
+
 export const errText = (e: any) => {
   const c = causeCode(e);
   if (c === 'ESSRF') { // say what was blocked, not just "fetch failed"
@@ -62,10 +69,27 @@ export class UpstreamManager {
   onToolsChanged: () => void = () => {};
 
   async load() {
-    for (const r of await q<UpstreamRow>('select id::int as id, slug, name, url, auth_header, credential, enabled, timeout_ms from upstreams order by id')) this.upsert(r);
-    for (const p of await q<{ upstream_id: number; tool: string; access: Access }>('select upstream_id::int as upstream_id, tool, access from tool_policies')) {
-      this.ups.get(p.upstream_id)?.access.set(p.tool, p.access);
-    }
+    const rows = await q<UpstreamRow>('select id::int as id, slug, name, url, auth_header, credential, enabled, timeout_ms from upstreams order by id');
+    const policies = await q<{ upstream_id: number; tool: string; access: Access }>('select upstream_id::int as upstream_id, tool, access from tool_policies');
+    const pins = await q<{ upstream_id: number; tool: string; hash: string; description: string | null }>('select upstream_id::int as upstream_id, tool, hash, description from tool_pins');
+    // all synchronous from here, so pins are in place before any probe can deliver a tool list
+    for (const r of rows) this.upsert(r);
+    for (const p of policies) this.ups.get(p.upstream_id)?.access.set(p.tool, p.access);
+    for (const p of pins) this.ups.get(p.upstream_id)?.pins.set(p.tool, { hash: p.hash, description: p.description });
+  }
+
+  /** An admin accepts a changed tool definition: re-pin it and make the tool available again. */
+  async approveTool(u: Upstream, tool: string) {
+    const t = u.tools.find((x) => x.name === tool);
+    if (!t) return false;
+    const pin = { hash: toolHash(t), description: t.description ?? null };
+    await q(`insert into tool_pins(upstream_id, tool, hash, description) values ($1,$2,$3,$4)
+             on conflict (upstream_id, tool) do update set hash = excluded.hash, description = excluded.description, approved_at = now()`,
+      [u.id, tool, pin.hash, pin.description]);
+    u.pins.set(tool, pin);
+    u.changed.delete(tool);
+    this.onToolsChanged();
+    return true;
   }
 
   accessOf(u: Upstream, tool: string): Access {
@@ -86,6 +110,7 @@ export class UpstreamManager {
     const u: Upstream = old ?? {
       id: r.id, slug: r.slug, name: r.name, url: r.url, authHeader: null, credential: null, enabled: r.enabled, timeoutMs: null,
       status: 'connecting', era: null, protocolVersion: null, lastError: null, statusSince: new Date(), tools: [], access: new Map(),
+      pins: new Map(), changed: new Set(),
       strikes: 0, retryMs: 0, busy: false, again: false, removed: false,
     };
     const credential = unseal(r.credential); // stored sealed; plaintext only in this process's memory
@@ -127,7 +152,7 @@ export class UpstreamManager {
     for (const u of this.ups.values()) {
       const visible = u.status === 'connected' || (u.status === 'unreachable' && now - u.statusSince.getTime() < 15_000);
       if (!u.enabled || !visible) continue;
-      for (const t of u.tools) out.push({ u, t, name: `${u.slug}__${t.name}` });
+      for (const t of u.tools) if (!u.changed.has(t.name)) out.push({ u, t, name: `${u.slug}__${t.name}` });
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -177,7 +202,26 @@ export class UpstreamManager {
   private setTools(u: Upstream, tools: ToolDef[]) {
     const before = JSON.stringify(u.tools);
     u.tools = tools;
-    if (JSON.stringify(tools) !== before) this.onToolsChanged();
+    if (JSON.stringify(tools) === before) return;
+    // Trust on first use: the admin who added the server approved what it offered then. A tool whose definition
+    // later changes (description, schema, hints) is quarantined until an admin re-approves it.
+    for (const t of tools) {
+      const hash = toolHash(t);
+      const pin = u.pins.get(t.name);
+      if (!pin) {
+        u.pins.set(t.name, { hash, description: t.description ?? null });
+        q(`insert into tool_pins(upstream_id, tool, hash, description) values ($1,$2,$3,$4) on conflict do nothing`,
+          [u.id, t.name, hash, t.description ?? null]).catch(() => {});
+      } else if (pin.hash !== hash) {
+        if (!u.changed.has(t.name)) {
+          u.changed.add(t.name);
+          log.warn({ upstream: u.slug, tool: t.name }, 'tool definition changed: quarantined until an admin approves');
+          q('insert into upstream_events(upstream_id, status, error) values ($1, $2, $3)',
+            [u.id, 'tool_changed', `tool "${t.name}" changed its definition; hidden until an admin approves it`]).catch(() => {});
+        }
+      } else u.changed.delete(t.name);
+    }
+    this.onToolsChanged();
   }
 
   private async probe(u: Upstream) {
