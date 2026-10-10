@@ -124,6 +124,11 @@ image, so a store upgrade is an image tag change (back up MariaDB first: plugin 
 
 ## Stand-outs attempted
 
+- **Tool permissions (S-2):** per tool, *Everyone* / *Admins only* / *Off* (dashboard → Servers → expand a server →
+  Access). Restricted tools are hidden from `tools/list` and rejected (`denied` in the audit log) if called by name;
+  clients get a `list_changed` push when a rule changes. Code: `packages/gateway/src/mcp.ts` (`allowed`),
+  `upstreams.ts` (`setAccess`), table `tool_policies`. Checked by `demo-check.sh` step 5b.
+
 - **Security hardening (partial):** SSRF guard on upstream connections (checks the address actually dialled, blocks
   private/metadata ranges, admin allow-list for in-cluster names) — `packages/gateway/src/ssrf.ts`; least-privilege
   RBAC (read-only EndpointSlice Role) — `charts/urumi/templates/gateway.yaml`; default-deny NetworkPolicies —

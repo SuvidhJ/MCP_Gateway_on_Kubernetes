@@ -8,7 +8,7 @@ import { config } from './config.js';
 import { q } from './db.js';
 import { log } from './log.js';
 import { principalFromJwt, principalFromKey, type Principal } from './auth.js';
-import { classify, errText, type UpstreamManager } from './upstreams.js';
+import { classify, errText, type Upstream, type UpstreamManager } from './upstreams.js';
 
 const errResult = (text: string) => ({ isError: true, content: [{ type: 'text' as const, text }] });
 const publicOrigin = new URL(config.publicUrl).origin;
@@ -20,11 +20,15 @@ async function audit(p: Principal, server: string | null, tool: string, ms: numb
     .catch((e) => log.error({ err: e.message }, 'audit insert failed'));
 }
 
-/** Call-time authorization hook, checked on every list and call (default allow; per-tool rules are stand-out S-2).
- *  Identity itself is re-checked per HTTP request, so a revoked key fails on its very next call. */
-const allowed = (_p: Principal, _server: string, _tool: string) => true;
-
 export function createGatewayMcp(mgr: UpstreamManager) {
+  /** Call-time authorization (stand-out S-2), checked on every list and every call: a restricted tool is hidden from
+   *  tools/list and rejected if called by name. Identity is re-checked per HTTP request, so a revoked key fails on
+   *  its very next call. */
+  const allowed = (p: Principal, u: Upstream, tool: string) => {
+    const a = mgr.accessOf(u, tool);
+    return a === 'member' || (a === 'admin' && p.role === 'admin');
+  };
+
   const handler = createMcpHandler(({ authInfo, era, requestInfo }) => {
     const p = authInfo!.extra!.principal as Principal;
     const s = new Server({ name: 'urumi-gateway', version: config.version }, {
@@ -33,7 +37,7 @@ export function createGatewayMcp(mgr: UpstreamManager) {
       cacheHints: { 'tools/list': { ttlMs: config.toolsTtlMs, cacheScope: 'private' } },
     } as any);
     s.setRequestHandler('tools/list', async () => ({
-      tools: mgr.catalog().filter((e) => allowed(p, e.u.slug, e.t.name)).map(({ u, t, name }) => ({
+      tools: mgr.catalog().filter((e) => allowed(p, e.u, e.t.name)).map(({ u, t, name }) => ({
         name,
         ...(t.title ? { title: t.title } : {}),
         description: `[${u.name}] ${t.description ?? ''}`.trim(),
@@ -55,9 +59,9 @@ export function createGatewayMcp(mgr: UpstreamManager) {
       if (!u || (u.client && !u.tools.some((t) => t.name === tool))) {
         outcome = 'unknown_tool';
         result = errResult(`Tool ${full} does not exist on this gateway.`);
-      } else if (!allowed(p, u.slug, tool)) {
+      } else if (!allowed(p, u, tool)) {
         outcome = 'denied';
-        result = errResult(`You are not allowed to call ${full}.`);
+        result = errResult(mgr.accessOf(u, tool) === 'off' ? `${full} is turned off by an administrator.` : `${full} is restricted to admins; your role is "${p.role}".`);
       } else if (!u.enabled) {
         outcome = 'disabled';
         result = errResult(`Server "${u.name}" is disabled by an administrator; ${full} is unavailable.`);

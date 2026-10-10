@@ -68,6 +68,12 @@ const MIGRATIONS: string[] = [
      client text);
    create index audit_log_user on audit_log (user_id, id desc);
    create index upstream_events_up on upstream_events (upstream_id, id desc);`,
+  // S-2 tool permissions: per-tool access level; no row = everyone (member and admin).
+  `create table tool_policies (
+     upstream_id bigint not null references upstreams(id) on delete cascade,
+     tool text not null,
+     access text not null check (access in ('member','admin','off')),
+     primary key (upstream_id, tool));`,
 ];
 
 export async function migrate() {

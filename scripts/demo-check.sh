@@ -98,6 +98,13 @@ mcp "$ALICE_KEY" --list >/dev/null; grep -q '^deepwiki__' "$TMP/mcp.out" && bad 
 expect 5 "calling a disabled server's tool returns a clear error" "$ALICE_KEY" deepwiki__read_wiki_structure '{"repoName":"x/y"}'
 api "$TMP/admin" "$ACSRF" PATCH "/servers/$DW" '{"enabled":true}' >/dev/null
 
+echo "== 5b. (stand-out S-2) restrict store__update_order_status to admins -> hidden from and rejected for members"
+ST=$(api "$TMP/admin" "$ACSRF" GET /servers | py "import json,sys; print(next(x['id'] for x in json.load(sys.stdin) if x['slug']=='store'))")
+api "$TMP/admin" "$ACSRF" PUT "/servers/$ST/tools/update_order_status/access" '{"access":"admin"}' >/dev/null
+mcp "$ALICE_KEY" --list >/dev/null; grep -q '^store__update_order_status' "$TMP/mcp.out" && bad "restricted tool still listed for a member" || ok "restricted tool hidden from alice's tools/list"
+expect 5 "member calling it by name is rejected" "$ALICE_KEY" store__update_order_status '{"id":1,"status":"completed"}'
+api "$TMP/admin" "$ACSRF" PUT "/servers/$ST/tools/update_order_status/access" '{"access":"member"}' >/dev/null
+
 echo "== 6. kill the demo-upstream pod -> others keep working, dashboard shows it unreachable"
 $K delete pod -l app=demo-upstream --wait=false >/dev/null
 ms=$(waitfor demo unreachable 20); [ "$ms" -ge 0 ] && ok "dashboard: demo unreachable after ${ms} ms" || bad "demo never shown unreachable"
@@ -113,7 +120,7 @@ def n(f): return sum(1 for i in items if f(i))
 a_chat=n(lambda i: i['userEmail']=='alice@urumi.local' and i['via']=='chat')
 a_key=n(lambda i: i['userEmail']=='alice@urumi.local' and i['via'].startswith('key:'))
 b_key=n(lambda i: i['userEmail']=='bob@urumi.local' and i['via']=='key:bob-laptop')
-dis=n(lambda i: i['userEmail']=='alice@urumi.local' and i['outcome']=='disabled')
+dis=n(lambda i: i['userEmail']=='alice@urumi.local' and i['outcome'] in ('disabled','denied'))
 print(a_chat, a_key, b_key, dis)" > "$TMP/counts"
 read -r a_chat a_key b_key dis < "$TMP/counts"
 [ $CHAT = 0 ] || { [ "$a_chat" -ge 2 ] && ok "alice's chat calls audited as alice via chat ($a_chat)" || bad "alice chat rows: $a_chat"; }

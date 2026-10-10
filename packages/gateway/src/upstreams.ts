@@ -12,6 +12,8 @@ import { log } from './log.js';
 import { createGuardedAgent } from './ssrf.js';
 
 export type Status = 'connecting' | 'connected' | 'unreachable' | 'auth_failed' | 'disabled';
+/** Who may see and call a tool: everyone ('member'), admins only, or nobody ('off'). */
+export type Access = 'member' | 'admin' | 'off';
 type ToolDef = Awaited<ReturnType<Client['listTools']>>['tools'][number];
 export interface UpstreamRow { id: number; slug: string; name: string; url: string; auth_header: string | null; credential: string | null; enabled: boolean; timeout_ms: number | null }
 
@@ -19,7 +21,7 @@ export interface Upstream {
   id: number; slug: string; name: string; url: string; authHeader: string | null; credential: string | null;
   enabled: boolean; timeoutMs: number | null;
   status: Status; era: 'modern' | 'legacy' | null; protocolVersion: string | null; lastError: string | null;
-  statusSince: Date; tools: ToolDef[];
+  statusSince: Date; tools: ToolDef[]; access: Map<string, Access>;
   client?: Client; sessionId?: string; strikes: number; retryMs: number; timer?: NodeJS.Timeout;
   busy: boolean; again: boolean; removed: boolean;
 }
@@ -56,13 +58,29 @@ export class UpstreamManager {
 
   async load() {
     for (const r of await q<UpstreamRow>('select id::int as id, slug, name, url, auth_header, credential, enabled, timeout_ms from upstreams order by id')) this.upsert(r);
+    for (const p of await q<{ upstream_id: number; tool: string; access: Access }>('select upstream_id::int as upstream_id, tool, access from tool_policies')) {
+      this.ups.get(p.upstream_id)?.access.set(p.tool, p.access);
+    }
+  }
+
+  accessOf(u: Upstream, tool: string): Access {
+    return u.access.get(tool) ?? 'member';
+  }
+
+  async setAccess(u: Upstream, tool: string, access: Access) {
+    if (access === 'member') await q('delete from tool_policies where upstream_id = $1 and tool = $2', [u.id, tool]);
+    else await q(`insert into tool_policies(upstream_id, tool, access) values ($1,$2,$3)
+                  on conflict (upstream_id, tool) do update set access = excluded.access`, [u.id, tool, access]);
+    if (access === 'member') u.access.delete(tool);
+    else u.access.set(tool, access);
+    this.onToolsChanged();
   }
 
   upsert(r: UpstreamRow) {
     const old = this.ups.get(r.id);
     const u: Upstream = old ?? {
       id: r.id, slug: r.slug, name: r.name, url: r.url, authHeader: null, credential: null, enabled: r.enabled, timeoutMs: null,
-      status: 'connecting', era: null, protocolVersion: null, lastError: null, statusSince: new Date(), tools: [],
+      status: 'connecting', era: null, protocolVersion: null, lastError: null, statusSince: new Date(), tools: [], access: new Map(),
       strikes: 0, retryMs: 0, busy: false, again: false, removed: false,
     };
     const reconnect = !old || old.url !== r.url || old.authHeader !== r.auth_header || old.credential !== r.credential;

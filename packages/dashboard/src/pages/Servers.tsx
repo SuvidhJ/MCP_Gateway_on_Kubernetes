@@ -1,6 +1,6 @@
 import { Fragment, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api, type Server, type ServerEvent, type Tool } from '../api';
+import { api, type Server, type ServerEvent, type Tool, type ToolAccess } from '../api';
 import { Badge, ErrorText, StatusBadge, Time, useAction, useIsAdmin } from '../ui';
 
 const SERVERS = ['servers'];
@@ -105,7 +105,7 @@ function ServerRow({ server: s, admin }: { server: Server; admin: boolean }) {
       {panel && (
         <tr className="detail">
           <td colSpan={cols}>
-            {panel === 'tools' && <ToolList tools={s.tools} />}
+            {panel === 'tools' && <ToolList server={s} admin={admin} />}
             {panel === 'edit' && <ServerForm server={s} onDone={() => setPanel(null)} />}
             {panel === 'history' && <History id={s.id} />}
           </td>
@@ -115,12 +115,18 @@ function ServerRow({ server: s, admin }: { server: Server; admin: boolean }) {
   );
 }
 
-function ToolList({ tools }: { tools: Tool[] }) {
+const ACCESS_LABEL: Record<ToolAccess, string> = { member: 'Everyone', admin: 'Admins only', off: 'Off' };
+
+function ToolList({ server, admin }: { server: Server; admin: boolean }) {
+  const tools: Tool[] = server.tools;
+  const setAccess = useAction(({ tool, access }: { tool: string; access: ToolAccess }) =>
+    api(`/api/servers/${server.id}/tools/${encodeURIComponent(tool)}/access`, { method: 'PUT', body: { access } }), [SERVERS]);
   if (tools.length === 0) return <p className="muted">No tools (server not connected or exposes none).</p>;
   return (
     <table className="inner">
-      <thead><tr><th>Gateway name</th><th>Description</th><th>Hints</th></tr></thead>
+      <thead><tr><th>Gateway name</th><th>Description</th><th>Hints</th><th title="Restricted tools are hidden from tools/list and rejected if called">Access</th></tr></thead>
       <tbody>
+        {setAccess.error && <tr><td colSpan={4}><ErrorText error={setAccess.error} /></td></tr>}
         {tools.map((t) => (
           <tr key={t.gatewayName}>
             <td><code>{t.gatewayName}</code>{t.title && <div className="sub">{t.title}</div>}</td>
@@ -130,6 +136,16 @@ function ToolList({ tools }: { tools: Tool[] }) {
               {t.annotations?.destructiveHint && <Badge tone="red">destructive</Badge>}
               {t.annotations?.idempotentHint && <Badge tone="grey">idempotent</Badge>}
               {!t.annotations?.readOnlyHint && <Badge tone="amber" title="Chat asks for approval">needs approval</Badge>}
+            </td>
+            <td>
+              {admin ? (
+                <select value={t.access} disabled={setAccess.isPending}
+                  onChange={(e) => setAccess.mutate({ tool: t.name, access: e.target.value as ToolAccess })}>
+                  {(Object.keys(ACCESS_LABEL) as ToolAccess[]).map((a) => <option key={a} value={a}>{ACCESS_LABEL[a]}</option>)}
+                </select>
+              ) : (
+                <Badge tone={t.access === 'member' ? 'green' : t.access === 'admin' ? 'amber' : 'grey'}>{ACCESS_LABEL[t.access]}</Badge>
+              )}
             </td>
           </tr>
         ))}
