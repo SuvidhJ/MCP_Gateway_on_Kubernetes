@@ -1,0 +1,18 @@
+{
+  "name": "urumi-mcp-gateway",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/shared", "packages/woo-mcp", "packages/demo-upstream", "packages/gateway", "packages/dashboard"],
+  "engines": { "node": ">=24.7" },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3",
+    "vitest": "5.0.3",
+    "tsx": "4.23.15"
+  }
+}
