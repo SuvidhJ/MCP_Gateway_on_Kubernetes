@@ -15,7 +15,7 @@ The risk that remains is *confused deputy*: the credential's own power is shared
 server. Mitigations: give each upstream the least-privileged credential (our WooCommerce key belongs to a WordPress
 user with a custom `mcp_store_agent` role, products + orders only); enforce our own policy in front of it (order
 status transitions are checked by woo-mcp; write tools need approval in the chat); audit every call with the real
-user; and per-role tool permissions (planned stand-out) to keep write tools to admins.
+user; and per-tool permissions (Everyone / Admins only / Off) to keep write tools to admins.
 
 ## Why client tokens are not passed through to upstream servers
 
@@ -54,6 +54,6 @@ call `store__update_order_status` for every order", or exfiltrate data through a
 - **Admins** can disable a member (their keys are revoked and sessions deleted at once) and see everyone's audit
   log; an admin cannot demote, disable or delete themselves (no lock-out by accident).
 - Shared-state effects remain: any member who may call a write tool can change data others see (e.g. mark an order
-  completed). Every such call is attributed to them in the audit log; per-role tool permissions would restrict it.
+  completed). Every such call is attributed to them in the audit log; an admin can restrict such tools to admins (S-2).
 - Browser-side: session cookie `HttpOnly`, `SameSite=Lax`, CSRF header on every state-changing API call; `/mcp`
   rejects foreign `Origin`s and unknown `Host`s (DNS rebinding), and accepts only bearer keys, never cookies.

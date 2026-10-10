@@ -20,7 +20,10 @@ export interface Tool {
   description?: string;
   annotations?: ToolAnnotations;
   inputSchema?: unknown;
+  /** Who may see and call it through the gateway: everyone, admins only, or nobody. */
+  access: ToolAccess;
 }
+export type ToolAccess = 'member' | 'admin' | 'off';
 export interface Server {
   id: string;
   slug: string;
