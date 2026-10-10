@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woo-mcp
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: woo-mcp } }
+  template:
+    metadata: { labels: { app: woo-mcp } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: woo-mcp
+          image: {{ .Values.images.wooMcp }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: WC_URL, value: "http://wordpress" }
+            - { name: STORE, value: "store" }
+            - { name: STORE_CURRENCY, value: {{ .Values.store.currency | quote }} }
+            - { name: PUBLIC_STORE_URL, value: {{ include "urumi.storeUrl" . | quote }} }
+            - { name: WC_CK, valueFrom: { secretKeyRef: { name: store-app, key: wc-ck } } }
+            - { name: WC_CS, valueFrom: { secretKeyRef: { name: store-app, key: wc-cs } } }
+          ports: [ { containerPort: 8080, name: http } ]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20 }
+          resources: { requests: { cpu: 20m, memory: 64Mi }, limits: { memory: 256Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: woo-mcp
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec: { selector: { app: woo-mcp }, ports: [ { port: 80, targetPort: http } ] }

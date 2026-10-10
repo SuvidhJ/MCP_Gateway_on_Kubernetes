@@ -7,14 +7,14 @@ commits). DoD first; stand-outs only after `scripts/demo-check.sh` passes. Defau
 - [x] git init, .gitignore, `.claude/settings.local.json`, overnight scripts, scheduled tasks, dry-run
 - [x] `planning/08-decisions.md` (17 decisions from 00-index §3, citing 07)
 - [x] disk cleanup, delete `urumi` cluster, pre-pull images, WooCommerce 11.2.0 zip + wp-cli 2.12.0 phar (checksums)
-- [ ] monorepo scaffold (npm workspaces) + `npm install`
+- [x] monorepo scaffold (npm workspaces) + `npm install`
 - [x] dev cluster `urumi-dev` (07 §1 command; ports 8080/8443)
 
 ## M1 store + woo-mcp
-- [ ] `images/wordpress`: immutable WordPress 7.1.3-php8.4 image + WooCommerce 11.2.0 + wp-cli 2.12.0, uid 33
-- [ ] bootstrap Job (idempotent, retries until DB ready): permalinks, coming-soon `no`, COD, free-shipping zone, HPOS,
+- [x] `images/wordpress`: immutable WordPress 7.1.3-php8.4 image + WooCommerce 11.2.0 + wp-cli 2.12.0, uid 33
+- [x] bootstrap Job (idempotent, retries until DB ready): permalinks, coming-soon `no`, COD, free-shipping zone, HPOS,
       timezone, `mcp_store_agent` role, 43-char WC keys from a Secret with checked insert
-- [ ] `packages/woo-mcp`: 5 tools (list/create products, list/get orders, update order status), currency in output,
+- [x] `packages/woo-mcp`: 5 tools (list/create products, list/get orders, update order status), currency in output,
       permalink rewrite, `customer_note` marked untrusted, status-transition policy, `X-Forwarded-Proto: https`,
       `*_gmt`+`Z` dates; unit tests
 

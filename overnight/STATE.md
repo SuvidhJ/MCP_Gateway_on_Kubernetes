@@ -23,11 +23,33 @@
   @vitejs/plugin-react 6.1.2, @tanstack/react-query 5.104.1.
 - Node: ALWAYS `fnm exec --using=24.21.0 <cmd>` (default node on PATH is 22.16).
 
+- **M1 DONE and verified (02:4x):** `helm upgrade --install urumi charts/urumi -n urumi --kube-context k3d-urumi-dev`
+  deploys MariaDB + WordPress (image `urumi/wordpress:dev`) + bootstrap hook Job (first run 75 s, re-run 12 s,
+  idempotent) + woo-mcp (`urumi/woo-mcp:dev`). All 5 tools called via
+  `kubectl -n urumi port-forward svc/woo-mcp 7811:80` + `fnm exec --using=24.21.0 node scripts/mcp-call.mjs http://127.0.0.1:7811/mcp <tool|--list> '<json>'`;
+  created product is live at http://store.127.0.0.1.nip.io:8080/shop/. woo-mcp has 10 vitest unit tests (pass).
+- Secrets: `store-db` and `store-app` generated via `lookup` (kept across upgrades, `resource-policy: keep`).
+  Store admin password: `kubectl -n urumi get secret store-app -o jsonpath='{.data.admin-password}' | base64 -d`.
+- Image builds: `docker build -f images/node/Dockerfile --build-arg PKG=<pkg> -t urumi/<pkg>:dev .` then
+  `~/bin/k3d.exe image import urumi/<pkg>:dev -c urumi-dev` (the gateway build also builds the dashboard into
+  `packages/dashboard/dist`; the gateway should serve it from `../dashboard/dist`). WordPress image:
+  `bash scripts/fetch-store-assets.sh && docker build -t urumi/wordpress:dev images/wordpress`.
+
 ## Next step
-- (see PLAN.md: first unchecked item)
+1. M2 gateway core in `packages/gateway` (Hono + `@hono/node-server`; TS SDK v2 per 08-decisions; port ideas from
+   `experiments/spike/gateway.mjs`, `ssrf-guard.mjs`, `e17-watch.mjs`). Postgres needs a chart template
+   (`postgres:18.6-alpine` already pulled) and a `gateway` Deployment + ServiceAccount/Role (EndpointSlice watch,
+   see `experiments/k8s/watch-rbac.yaml`) + Ingress host `gateway.127.0.0.1.nip.io`.
+2. `packages/demo-upstream` (tiny MCP server, 1-2 tools) + chart template, for the kill-pod demo.
+3. Then M3 dashboard, M4 chat, rest of M5 (NetworkPolicies, `scripts/up.sh`, adapt `scripts/demo-check.sh`), M6.
 
 ## Blockers / notes
-- (none yet)
+- TypeScript 6: `types` defaults to none, so `tsconfig.base.json` sets `types: [""node""]`; tests are excluded
+  from `tsc` builds (vitest runs them).
+- On Windows use `npm.cmd`/`npx.cmd` under fnm: `fnm exec --using=24.21.0 npm.cmd ...` (plain `npm` fails).
+- npm warned esbuild's postinstall is not in allowScripts; vitest/tsx still work. Approve only if a build breaks.
+- Bash heredocs with many nested quotes have failed once; prefer the Write tool for big files.
+- k3d has kept data: cluster `urumi-dev` holds release `urumi` in namespace `urumi`.
 
 ## Background processes started (kill if stale)
 - (none)
