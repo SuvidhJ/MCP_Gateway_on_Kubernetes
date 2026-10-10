@@ -19,6 +19,7 @@ spec:
             - { name: WC_URL, value: "http://wordpress" }
             - { name: STORE, value: "store" }
             - { name: STORE_CURRENCY, value: {{ .Values.store.currency | quote }} }
+            - { name: STORE_TIMEZONE, value: {{ .Values.store.timezone | quote }} }
             - { name: PUBLIC_STORE_URL, value: {{ include "urumi.storeUrl" . | quote }} }
             - { name: WC_CK, valueFrom: { secretKeyRef: { name: store-app, key: wc-ck } } }
             - { name: WC_CS, valueFrom: { secretKeyRef: { name: store-app, key: wc-cs } } }

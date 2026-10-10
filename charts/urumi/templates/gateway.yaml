@@ -77,6 +77,8 @@ spec:
             - { name: LLM_API_KEY, valueFrom: { secretKeyRef: { name: gateway-app, key: llm-api-key } } }
             - { name: STORE_TIMEZONE, value: {{ .Values.store.timezone | quote }} }
           ports: [ { containerPort: 8080, name: http } ]
+          # let the ingress/Service stop routing here before SIGTERM (no dropped requests on rollouts)
+          lifecycle: { preStop: { sleep: { seconds: 3 } } }
           readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20, initialDelaySeconds: 60 }
           resources: {{- toYaml .Values.gateway.resources | nindent 12 }}

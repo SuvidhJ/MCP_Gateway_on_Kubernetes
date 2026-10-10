@@ -67,13 +67,13 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: '0.0.0.0' 
 (server as any).headersTimeout = 60_000;
 
 for (const sig of ['SIGTERM', 'SIGINT'] as const) {
-  process.on(sig, async () => {
+  process.on(sig, () => {
+    // The pod's preStop sleep already let the Service drop this endpoint; finish in-flight requests, then exit.
     log.info({ sig }, 'shutting down');
     mgr.stop();
-    await mcp.close().catch(() => {});
-    server.close();
-    await pool.end().catch(() => {});
-    process.exit(0);
+    mcp.close().catch(() => {}); // ends open listen streams so close() can finish
+    server.close(() => pool.end().finally(() => process.exit(0)));
+    setTimeout(() => process.exit(0), 8000).unref();
   });
 }
 
