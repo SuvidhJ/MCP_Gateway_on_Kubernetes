@@ -15,6 +15,7 @@ images:
 store:
   host: store            # -> store.<baseDomain>
   title: Urumi Store
+  name: Urumi            # how MCP tool descriptions name the shop ("List products in the Urumi WooCommerce store")
   adminUser: admin
   adminEmail: admin@store.invalid
   timezone: Asia/Kolkata
