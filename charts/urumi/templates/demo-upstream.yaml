@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-upstream
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: demo-upstream } }
+  template:
+    metadata: { labels: { app: demo-upstream } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: demo-upstream
+          image: {{ .Values.images.demoUpstream }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - { name: PORT, value: "8080" }
+          ports: [ { containerPort: 8080, name: http } ]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20 }
+          resources: { requests: { cpu: 10m, memory: 48Mi }, limits: { memory: 192Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-upstream
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec: { selector: { app: demo-upstream }, ports: [ { port: 80, targetPort: http } ] }
