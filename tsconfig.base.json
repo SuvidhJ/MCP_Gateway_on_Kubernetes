@@ -9,6 +9,7 @@
     "declaration": true,
     "sourceMap": true,
     "resolveJsonModule": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    "types": ["node"]
   }
 }
