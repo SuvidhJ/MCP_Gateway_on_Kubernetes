@@ -1,0 +1,6 @@
+apiVersion: v2
+name: urumi
+description: MCP gateway on Kubernetes with a WooCommerce store, its MCP server, a demo upstream and the dashboard
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-uploads
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: {{ .Values.store.storageSize }} } } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: wordpress } }
+  template:
+    metadata: { labels: { app: wordpress } }
+    spec:
+      containers:
+        - name: wordpress
+          image: {{ .Values.images.wordpress }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env: {{- include "urumi.wpEnv" . | nindent 12 }}
+          ports: [ { containerPort: 80, name: http } ]
+          readinessProbe: { httpGet: { path: /wp-includes/images/blank.gif, port: http }, periodSeconds: 5 }
+          livenessProbe: { tcpSocket: { port: http }, periodSeconds: 20, initialDelaySeconds: 30 }
+          resources: {{- toYaml .Values.store.resources | nindent 12 }}
+          # Code comes from the image; only uploads persist.
+          volumeMounts: [ { name: uploads, mountPath: /var/www/html/wp-content/uploads } ]
+      volumes: [ { name: uploads, persistentVolumeClaim: { claimName: wordpress-uploads } } ]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec: { selector: { app: wordpress }, ports: [ { port: 80, targetPort: http } ] }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wordpress
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingressClassName }}
+  rules:
+    - host: {{ .Values.store.host }}.{{ .Values.baseDomain }}
+      http: { paths: [ { path: /, pathType: Prefix, backend: { service: { name: wordpress, port: { number: 80 } } } } ] }
+---
+# Idempotent bootstrap. A hook so it re-runs on every upgrade; it waits for the DB itself (Helm 4 hooks don't wait
+# for readiness) and the Job retries on failure.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: store-bootstrap
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 10
+  activeDeadlineSeconds: 900
+  template:
+    metadata: { labels: { app: store-bootstrap } }
+    spec:
+      restartPolicy: OnFailure
+      securityContext: { runAsUser: 33, runAsGroup: 33, runAsNonRoot: true }
+      containers:
+        - name: bootstrap
+          image: {{ .Values.images.wordpress }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["/usr/local/bin/urumi-bootstrap"]
+          env:
+            {{- include "urumi.wpEnv" . | nindent 12 }}
+            - { name: STORE_URL, value: {{ include "urumi.storeUrl" . | quote }} }
+            - { name: STORE_TITLE, value: {{ .Values.store.title | quote }} }
+            - { name: STORE_ADMIN_USER, value: {{ .Values.store.adminUser | quote }} }
+            - { name: STORE_ADMIN_EMAIL, value: {{ .Values.store.adminEmail | quote }} }
+            - { name: STORE_ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: store-app, key: admin-password } } }
+            - { name: STORE_TIMEZONE, value: {{ .Values.store.timezone | quote }} }
+            - { name: STORE_CURRENCY, value: {{ .Values.store.currency | quote }} }
+            - { name: STORE_COUNTRY, value: {{ .Values.store.country | quote }} }
+            - { name: MCP_WC_USER, value: {{ .Values.store.mcpUser | quote }} }
+            - { name: MCP_WC_CK, valueFrom: { secretKeyRef: { name: store-app, key: wc-ck } } }
+            - { name: MCP_WC_CS, valueFrom: { secretKeyRef: { name: store-app, key: wc-cs } } }
+          resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 512Mi } }
