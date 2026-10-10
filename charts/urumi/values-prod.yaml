@@ -1,0 +1,23 @@
+# Production-like VPS (single-node k3s with its bundled Traefik). Same chart, different values:
+#   helm upgrade --install urumi charts/urumi -n urumi --create-namespace -f charts/urumi/values-prod.yaml \
+#     --set baseDomain=<your-domain> --set gateway.llm.apiKey=<key>
+baseDomain: example.com          # store.example.com, gateway.example.com (DNS A records -> the VPS)
+publicPort: 443
+tls:
+  enabled: true
+  secretName: urumi-tls          # e.g. issued by cert-manager, or `kubectl create secret tls urumi-tls ...`
+images:
+  wordpress: ghcr.io/suvidhj/urumi-wordpress:0.1.0
+  wooMcp: ghcr.io/suvidhj/urumi-woo-mcp:0.1.0
+  demoUpstream: ghcr.io/suvidhj/urumi-demo-upstream:0.1.0
+  gateway: ghcr.io/suvidhj/urumi-gateway:0.1.0
+  pullPolicy: IfNotPresent
+store: { storageSize: 5Gi }
+mariadb: { storageSize: 5Gi }
+postgres: { storageSize: 5Gi }
+gateway:
+  llm:
+    # Any OpenAI-compatible endpoint; a hosted free tier (key via --set gateway.llm.apiKey=...).
+    baseUrl: https://api.groq.com/openai/v1
+    model: openai/gpt-oss-20b
+    reasoningEffort: low

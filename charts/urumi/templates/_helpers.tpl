@@ -4,8 +4,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
+{{/* Public URL of a host under baseDomain: http(s)://<host>.<baseDomain>[:port] (no port for 80/443). */}}
+{{- define "urumi.publicUrl" -}}
+{{ ternary "https" "http" .root.Values.tls.enabled }}://{{ .host }}.{{ .root.Values.baseDomain }}{{ if not (has (int .root.Values.publicPort) (list 80 443)) }}:{{ .root.Values.publicPort }}{{ end }}
+{{- end -}}
+
 {{- define "urumi.storeUrl" -}}
-http://{{ .Values.store.host }}.{{ .Values.baseDomain }}{{ if ne (int .Values.publicPort) 80 }}:{{ .Values.publicPort }}{{ end }}
+{{ include "urumi.publicUrl" (dict "root" . "host" .Values.store.host) }}
 {{- end -}}
 
 {{/* Reuse a generated secret value across upgrades: read the live Secret, else use the generated value. */}}

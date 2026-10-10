@@ -31,3 +31,41 @@ mariadb:
   resources:
     requests: { cpu: 50m, memory: 256Mi }
     limits: { memory: 512Mi }
+
+# TLS on the Ingress (prod: a cert-manager or pre-made secret). Off locally.
+tls:
+  enabled: false
+  secretName: urumi-tls
+
+postgres:
+  storageSize: 1Gi
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
+gateway:
+  host: gateway          # -> gateway.<baseDomain>; serves /mcp, /api and the dashboard
+  adminEmail: admin@urumi.local
+  callTimeoutMs: 30000   # default per-call upstream timeout (per-server override in the dashboard)
+  # In-cluster hostnames the SSRF guard lets resolve to private addresses (everything else must be public).
+  ssrfAllowHosts: [woo-mcp, demo-upstream]
+  # Registered on first start only (afterwards the dashboard/DB is the source of truth).
+  seedServers:
+    - { slug: store, name: "Store (WooCommerce)", url: "http://woo-mcp/mcp" }
+    - { slug: demo, name: "Demo upstream", url: "http://demo-upstream/mcp", timeoutMs: 10000 }
+    - { slug: deepwiki, name: "DeepWiki", url: "https://mcp.deepwiki.com/mcp" }
+  # Chat agent: any OpenAI-compatible endpoint. Local default: Ollama on the host (reachable from k3d pods).
+  llm:
+    baseUrl: http://host.k3d.internal:11434/v1
+    model: qwen3.5-agent
+    apiKey: ""
+    reasoningEffort: none  # sent as reasoning_effort; "" to omit (for providers that reject it)
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
+# Ingress-only NetworkPolicies (default deny; upstream MCP servers reachable only from the gateway).
+networkPolicy:
+  enabled: true
+  ingressNamespace: kube-system           # where the ingress controller runs (k3s: Traefik in kube-system)
+  ingressPodLabels: { app.kubernetes.io/name: traefik }

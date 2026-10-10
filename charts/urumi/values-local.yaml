@@ -1,0 +1,9 @@
+# Local k3d (scripts/up.sh). values.yaml already holds the local defaults; this file pins the local-only choices.
+baseDomain: 127.0.0.1.nip.io
+publicPort: 8080
+tls: { enabled: false }
+images: { pullPolicy: IfNotPresent }   # local images are imported with `k3d image import` (tags are :dev, never pulled)
+gateway:
+  llm:
+    baseUrl: http://host.k3d.internal:11434/v1   # Ollama on the host GPU
+    model: qwen3.5-agent

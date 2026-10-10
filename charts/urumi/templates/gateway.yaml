@@ -1,0 +1,104 @@
+{{- $ns := .Release.Namespace -}}
+{{- $gwUrl := include "urumi.publicUrl" (dict "root" . "host" .Values.gateway.host) -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gateway-app
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+  annotations: { helm.sh/resource-policy: keep }
+type: Opaque
+stringData:
+  admin-password: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "admin-password" "gen" (randAlphaNum 20)) | quote }}
+  key-pepper: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "key-pepper" "gen" (randAlphaNum 48)) | quote }}
+  jwt-secret: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "jwt-secret" "gen" (randAlphaNum 48)) | quote }}
+  llm-api-key: {{ .Values.gateway.llm.apiKey | default "none" | quote }}
+---
+# Read-only, namespace-scoped: the gateway watches EndpointSlices to see an in-cluster upstream die in ~0.2 s.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gateway-endpointslice-reader
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gateway-endpointslice-reader
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+subjects: [ { kind: ServiceAccount, name: gateway, namespace: {{ $ns }} } ]
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: gateway-endpointslice-reader }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: gateway } }
+  template:
+    metadata:
+      labels: { app: gateway }
+    spec:
+      serviceAccountName: gateway
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: gateway
+          image: {{ .Values.images.gateway }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: PUBLIC_URL, value: {{ $gwUrl | quote }} }
+            - { name: COOKIE_SECURE, value: {{ ternary "1" "0" .Values.tls.enabled | quote }} }
+            - { name: DB_PASSWORD, valueFrom: { secretKeyRef: { name: gateway-db, key: password } } }
+            - { name: DATABASE_URL, value: "postgres://urumi:$(DB_PASSWORD)@postgres:5432/urumi" }
+            - { name: ADMIN_EMAIL, value: {{ .Values.gateway.adminEmail | quote }} }
+            - { name: ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: gateway-app, key: admin-password } } }
+            - { name: KEY_PEPPER, valueFrom: { secretKeyRef: { name: gateway-app, key: key-pepper } } }
+            - { name: JWT_SECRET, valueFrom: { secretKeyRef: { name: gateway-app, key: jwt-secret } } }
+            - { name: ALLOWED_HOSTS, value: "gateway,gateway.{{ $ns }},gateway.{{ $ns }}.svc,gateway.{{ $ns }}.svc.cluster.local,127.0.0.1,localhost" }
+            - { name: SSRF_ALLOW_HOSTS, value: {{ join "," .Values.gateway.ssrfAllowHosts | quote }} }
+            - { name: K8S_WATCH_NAMESPACE, value: {{ $ns | quote }} }
+            - { name: SEED_SERVERS, value: {{ .Values.gateway.seedServers | toJson | quote }} }
+            - { name: CALL_TIMEOUT_MS, value: {{ .Values.gateway.callTimeoutMs | quote }} }
+            - { name: LLM_BASE_URL, value: {{ .Values.gateway.llm.baseUrl | quote }} }
+            - { name: LLM_MODEL, value: {{ .Values.gateway.llm.model | quote }} }
+            - { name: LLM_REASONING_EFFORT, value: {{ .Values.gateway.llm.reasoningEffort | quote }} }
+            - { name: LLM_API_KEY, valueFrom: { secretKeyRef: { name: gateway-app, key: llm-api-key } } }
+            - { name: STORE_TIMEZONE, value: {{ .Values.store.timezone | quote }} }
+          ports: [ { containerPort: 8080, name: http } ]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20, initialDelaySeconds: 60 }
+          resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec: { selector: { app: gateway }, ports: [ { port: 80, targetPort: http } ] }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingressClassName }}
+  {{- if .Values.tls.enabled }}
+  tls: [ { hosts: [ {{ printf "%s.%s" .Values.gateway.host .Values.baseDomain | quote }} ], secretName: {{ .Values.tls.secretName }} } ]
+  {{- end }}
+  rules:
+    - host: {{ .Values.gateway.host }}.{{ .Values.baseDomain }}
+      http: { paths: [ { path: /, pathType: Prefix, backend: { service: { name: gateway, port: { number: 80 } } } } ] }

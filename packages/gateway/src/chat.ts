@@ -38,6 +38,8 @@ export async function chat(user: User, messages: UIMessage[], mgr: UpstreamManag
     experimental_toolApprovalSecret: config.jwtSecret, // approvals are signed, so a client can't forge one
     stopWhen: stepCountIs(8),
     temperature: 0,
+    // Thinking costs 2-2.5x latency for the same accuracy here (experiment E8); "none" turns it off on Ollama.
+    ...(config.llmReasoningEffort ? { providerOptions: { llm: { reasoningEffort: config.llmReasoningEffort } } } : {}),
     abortSignal: signal,
     onFinish: close,
     onAbort: close,
