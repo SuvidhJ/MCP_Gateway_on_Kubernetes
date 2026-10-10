@@ -15,7 +15,8 @@ ARG PKG
 RUN npm run build -w @urumi/shared --if-present \
  && npm run build -w @urumi/${PKG} \
  && if [ "$PKG" = "gateway" ]; then npm run build -w @urumi/dashboard; fi \
- && mkdir -p packages/dashboard/dist \n && npm prune --omit=dev
+ && mkdir -p packages/dashboard/dist \
+ && npm prune --omit=dev
 
 FROM node:24.21.0-alpine
 ARG PKG
