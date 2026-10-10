@@ -180,3 +180,6 @@ pre.json { background: #f4f6f9; color: var(--text); border: 1px solid var(--bord
   .form .grid { grid-template-columns: 1fr; }
   .form .grid .wide { grid-column: auto; }
 }
+
+.changed { margin-bottom: 6px; }
+.changed .sub { margin-top: 2px; }

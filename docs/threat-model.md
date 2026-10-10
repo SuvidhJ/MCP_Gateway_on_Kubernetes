@@ -42,8 +42,10 @@ call `store__update_order_status` for every order", or exfiltrate data through a
 - **Data the buyer typed** (`customer_note`) is wrapped as `untrusted_text` with a warning; the chat system prompt
   says notes are data, never instructions.
 - NetworkPolicies: upstream servers can't reach woo-mcp or the databases (only the gateway can reach upstreams).
-- Not yet done (next): pinning tool definitions on first approval and quarantining a server whose tool definitions
-  change (rug pull), and description sanitising/length limits.
+- **Rug pull:** tool definitions are pinned on first sight; a later change to a tool's description, schema or hints
+  quarantines that tool (hidden and rejected) until an admin compares old and new text and approves. A server can't
+  silently turn a reviewed tool into an injection vector.
+- Not yet done: description sanitising/length limits, and per-tool argument rules.
 
 ## What one team member can do to another
 

@@ -74,6 +74,14 @@ const MIGRATIONS: string[] = [
      tool text not null,
      access text not null check (access in ('member','admin','off')),
      primary key (upstream_id, tool));`,
+  // Tool-definition pinning (rug-pull defence): the definition seen first (or last approved by an admin).
+  `create table tool_pins (
+     upstream_id bigint not null references upstreams(id) on delete cascade,
+     tool text not null,
+     hash text not null,
+     description text,
+     approved_at timestamptz not null default now(),
+     primary key (upstream_id, tool));`,
 ];
 
 export async function migrate() {
