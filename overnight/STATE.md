@@ -1,7 +1,9 @@
 # Overnight state (live; update after every meaningful step)
 
 ## Now
-- Window A (interactive chat, 02:23-~04:40 IST) did M0 setup; Window B (scheduled, 04:45) continues from here.
+- Window B (04:45-): M2 gateway core + M3 dashboard + M4 chat backend written and verified LOCALLY (05:10):
+  gateway via tsx on :7801 against a dev Postgres container `urumi-pg-dev` (host port 55432), demo-upstream on :7802.
+  In progress: Helm templates for Postgres + gateway (M5), then in-cluster DoD check.
 
 ## Done
 - git repo initialised (`main`), `.gitignore`, `.claude/settings.local.json` (broad allow + deny list).
@@ -52,7 +54,9 @@
 - k3d has kept data: cluster `urumi-dev` holds release `urumi` in namespace `urumi`.
 
 ## Background processes started (kill if stale)
-- (none)
+- Docker container `urumi-pg-dev` (postgres, port 55432) for local gateway dev: `docker rm -f urumi-pg-dev`.
+- Local node processes on :7801 (gateway via tsx) and :7802 (demo-upstream): kill by port
+  (`netstat -ano | grep :7801`, then `taskkill //PID <pid> //F //T`).
 
 ## System settings changed (revert in the morning)
 | Setting | Before | Now | Revert |
