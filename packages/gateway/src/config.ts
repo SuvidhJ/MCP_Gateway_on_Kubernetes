@@ -15,6 +15,7 @@ export const config = {
   allowedHosts: env('ALLOWED_HOSTS', 'gateway,gateway.urumi,gateway.urumi.svc,gateway.urumi.svc.cluster.local,127.0.0.1,localhost')
     .split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
   keyPepper: env('KEY_PEPPER', 'dev-pepper-change-me'),
+  credentialKey: env('CREDENTIAL_KEY', 'dev-credential-key-change-me'),
   jwtSecret: env('JWT_SECRET', 'dev-jwt-secret-change-me-dev-jwt-secret'),
   adminEmail: env('ADMIN_EMAIL', 'admin@urumi.local'),
   adminPassword: env('ADMIN_PASSWORD', 'admin-dev-password'),

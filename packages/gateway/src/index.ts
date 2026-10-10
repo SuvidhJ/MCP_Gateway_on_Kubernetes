@@ -18,6 +18,7 @@ import { createGatewayMcp } from './mcp.js';
 import { createApi } from './api.js';
 import { chat } from './chat.js';
 import { startEndpointWatch } from './k8s.js';
+import { seal } from './sealed.js';
 
 await waitForDb();
 await migrate();
@@ -85,7 +86,7 @@ async function seedServers() {
   const list = JSON.parse(config.seedServers) as { slug: string; name: string; url: string; authHeader?: string; credential?: string; timeoutMs?: number }[];
   for (const s of list) {
     await q<UpstreamRow>(`insert into upstreams(slug, name, url, auth_header, credential, timeout_ms) values ($1,$2,$3,$4,$5,$6) on conflict (slug) do nothing`,
-      [s.slug, s.name, s.url, s.credential ? (s.authHeader ?? 'Authorization') : null, s.credential ?? null, s.timeoutMs ?? null]);
+      [s.slug, s.name, s.url, s.credential ? (s.authHeader ?? 'Authorization') : null, seal(s.credential), s.timeoutMs ?? null]);
   }
   await q(`insert into schema_migrations(version) values (-1) on conflict do nothing`); // marker: seeding done once
   log.info({ count: list.length }, 'seeded upstream servers');
