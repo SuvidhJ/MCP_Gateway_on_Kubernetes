@@ -9,6 +9,7 @@ import { q } from './db.js';
 import { log } from './log.js';
 import { principalFromJwt, principalFromKey, type Principal } from './auth.js';
 import { classify, errText, type Upstream, type UpstreamManager } from './upstreams.js';
+import { recordCall } from './metrics.js';
 
 const errResult = (text: string) => ({ isError: true, content: [{ type: 'text' as const, text }] });
 const publicOrigin = new URL(config.publicUrl).origin;
@@ -91,6 +92,7 @@ export function createGatewayMcp(mgr: UpstreamManager) {
             : `Server "${u.name}" failed: ${e instanceof ProtocolError ? 'protocol error: ' : ''}${error}`);
         }
       }
+      recordCall(slug, outcome, Date.now() - t0);
       await audit(p, slug, tool, Date.now() - t0, outcome, error ?? (outcome === 'ok' ? null : result.content[0].text), era, client);
       return result;
     });

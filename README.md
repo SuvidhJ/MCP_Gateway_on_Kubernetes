@@ -146,5 +146,11 @@ image, so a store upgrade is an image tag change (back up MariaDB first: plugin 
   `charts/urumi/templates/networkpolicies.yaml`; non-root containers; Host/Origin checks on `/mcp`; signed tool
   approvals in the chat (a client can't forge an approval); **upstream credentials encrypted at rest** (AES-256-GCM,
   key in the `gateway-app` Secret; the DB holds only `v1.<iv>.<tag>.<ciphertext>`) — `packages/gateway/src/sealed.ts`.
-- **Observability (partial):** upstream status history with the classified reason (refused / timeout / auth),
-  structured JSON logs, audit outcomes (`timeout`, `unreachable`, `upstream_auth`, `tool_error`, …).
+- **Observability:** per-server *Last hour* column in the dashboard (calls, failures, p95 latency, from the audit log so
+  it covers all replicas; `GET /api/stats`); Prometheus `/metrics` on port 9091 of each gateway pod (not routed by
+  the Ingress): `urumi_tool_calls_total{server,outcome}`, `urumi_tool_call_duration_seconds` histogram,
+  `urumi_upstream_up` (`kubectl -n urumi exec deploy/gateway -- wget -qO- 127.0.0.1:9091/metrics`); upstream status
+  history with the classified reason (refused / timeout / auth / SSRF block); structured JSON logs; audit outcomes
+  (`timeout`, `unreachable`, `upstream_auth`, `tool_error`, `denied`, `quarantined`, …).
+- **Upgrades and rollback:** verified `helm rollback urumi 1` (2 → 1 gateway replicas, generated Secrets unchanged)
+  and upgrading forward again; see *Production-like VPS* above.
