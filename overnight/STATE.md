@@ -1,9 +1,10 @@
 # Overnight state (live; update after every meaningful step)
 
 ## Now
-- Window B (04:45-): M2 gateway core + M3 dashboard + M4 chat backend written and verified LOCALLY (05:10):
-  gateway via tsx on :7801 against a dev Postgres container `urumi-pg-dev` (host port 55432), demo-upstream on :7802.
-  In progress: Helm templates for Postgres + gateway (M5), then in-cluster DoD check.
+- Window B (04:45-): M2 gateway, M3 dashboard, M4 chat, M5 chart (Postgres, gateway, NetworkPolicies, values-local/prod)
+  DONE. **`bash scripts/demo-check.sh` passes 23/23 in k3d `urumi-dev` (05:05)**, incl. chat approval round-trip
+  and "orders today" (store-timezone fix in woo-mcp + exact start-of-day bound in the chat prompt).
+- Next: `scripts/up.sh`, README (M6), browser check of the dashboard, then S-2/S-6.
 
 ## Done
 - git repo initialised (`main`), `.gitignore`, `.claude/settings.local.json` (broad allow + deny list).

@@ -79,3 +79,12 @@ describe('WC client wiring', () => {
     expect(buildServer({ wcUrl: 'http://wp', ck: 'a', cs: 'b', store: 's', currency: 'INR', timeoutMs: 1000 })).toBeTruthy();
   });
 });
+
+describe('isoLocal', () => {
+  it('renders the UTC instant as store wall-clock time with offset', async () => {
+    const { isoLocal } = await import('./logic.js');
+    expect(isoLocal('2026-10-10T23:30:00', 'Asia/Kolkata')).toBe('2026-10-11T05:00:00+05:30');
+    expect(isoLocal('2026-10-10T23:30:00', 'UTC')).toBe('2026-10-10T23:30:00+00:00');
+    expect(isoLocal(null, 'UTC')).toBeNull();
+  });
+});

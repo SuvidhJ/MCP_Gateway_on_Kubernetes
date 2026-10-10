@@ -13,6 +13,7 @@ export type Config = {
   cs: string;
   store: string;
   currency: string;
+  timezone: string;
   publicStoreUrl?: string;
   timeoutMs: number;
 };
@@ -27,6 +28,7 @@ export function configFromEnv(env = process.env): Config {
     cs,
     store: env.STORE ?? 'store',
     currency: env.STORE_CURRENCY ?? 'INR',
+    timezone: env.STORE_TIMEZONE ?? 'UTC',
     publicStoreUrl: env.PUBLIC_STORE_URL || undefined,
     timeoutMs: Number(env.WC_TIMEOUT_MS ?? 8000),
   };
@@ -141,7 +143,8 @@ export function buildServer(cfg: Config, fetchImpl: typeof fetch = fetch): McpSe
       title: 'List orders',
       description:
         `List orders in the ${cfg.store} store, newest first. Filter by status and/or created_after ` +
-        '(ISO 8601 timestamp; for "today" pass the start of today in the store timezone).',
+        '(ISO 8601 timestamp; for "today" pass the start of today in the store timezone). ' +
+        'Judge dates by created_at_store_time (store timezone), not the UTC created_at.',
       inputSchema: z.object({
         status: z.array(z.enum(ORDER_STATUSES)).optional(),
         created_after: z.iso.datetime({ offset: true }).optional(),
@@ -161,7 +164,7 @@ export function buildServer(cfg: Config, fetchImpl: typeof fetch = fetch): McpSe
             _fields: 'id,number,status,currency,total,date_created_gmt,billing,line_items,payment_method,payment_method_title',
           },
         });
-        return ok({ total, orders: json.map(orderSummary) });
+        return ok({ total, store_timezone: cfg.timezone, orders: json.map((o: any) => orderSummary(o, cfg.timezone)) });
       } catch (e) {
         return fail(e, 'orders');
       }
@@ -179,7 +182,7 @@ export function buildServer(cfg: Config, fetchImpl: typeof fetch = fetch): McpSe
     async ({ id }) => {
       try {
         const { json } = await wc('GET', `/wc/v3/orders/${id}`);
-        return ok(orderDetail(json));
+        return ok(orderDetail(json, cfg.timezone));
       } catch (e) {
         return fail(e, `order ${id}`);
       }
