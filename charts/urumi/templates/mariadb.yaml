@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: {{ .Values.mariadb.storageSize }} } } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mariadb
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: mariadb } }
+  template:
+    metadata: { labels: { app: mariadb } }
+    spec:
+      containers:
+        - name: mariadb
+          image: {{ .Values.images.mariadb }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - { name: MARIADB_ROOT_PASSWORD, valueFrom: { secretKeyRef: { name: store-db, key: root } } }
+            - { name: MARIADB_DATABASE, valueFrom: { secretKeyRef: { name: store-db, key: database } } }
+            - { name: MARIADB_USER, valueFrom: { secretKeyRef: { name: store-db, key: user } } }
+            - { name: MARIADB_PASSWORD, valueFrom: { secretKeyRef: { name: store-db, key: password } } }
+          ports: [ { containerPort: 3306, name: mysql } ]
+          readinessProbe: { exec: { command: ["healthcheck.sh", "--connect", "--innodb_initialized"] }, periodSeconds: 5 }
+          livenessProbe: { exec: { command: ["healthcheck.sh", "--connect"] }, periodSeconds: 20, initialDelaySeconds: 30 }
+          resources: {{- toYaml .Values.mariadb.resources | nindent 12 }}
+          volumeMounts: [ { name: data, mountPath: /var/lib/mysql } ]
+      volumes: [ { name: data, persistentVolumeClaim: { claimName: mariadb } } ]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec: { selector: { app: mariadb }, ports: [ { port: 3306, targetPort: mysql } ] }

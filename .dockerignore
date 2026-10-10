@@ -1,0 +1,9 @@
+node_modules
+**/node_modules
+**/dist
+experiments
+planning
+overnight
+images/wordpress/downloads
+.git
+*.log

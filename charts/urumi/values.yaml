@@ -1,0 +1,33 @@
+# Public hostnames (nip.io resolves *.127.0.0.1.nip.io to 127.0.0.1; k3d maps host :8080 -> ingress :80).
+baseDomain: 127.0.0.1.nip.io
+publicPort: 8080
+ingressClassName: traefik
+
+images:
+  wordpress: urumi/wordpress:dev
+  mariadb: mariadb:11.4.13
+  postgres: postgres:18.6-alpine
+  wooMcp: urumi/woo-mcp:dev
+  demoUpstream: urumi/demo-upstream:dev
+  gateway: urumi/gateway:dev
+  pullPolicy: IfNotPresent
+
+store:
+  host: store            # -> store.<baseDomain>
+  title: Urumi Store
+  adminUser: admin
+  adminEmail: admin@store.invalid
+  timezone: Asia/Kolkata
+  currency: INR
+  country: "IN:KA"
+  mcpUser: mcp-agent
+  storageSize: 2Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 768Mi }
+
+mariadb:
+  storageSize: 2Gi
+  resources:
+    requests: { cpu: 50m, memory: 256Mi }
+    limits: { memory: 512Mi }
