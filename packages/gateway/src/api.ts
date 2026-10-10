@@ -8,6 +8,7 @@ import {
   createKey, createSession, deleteSession, hashPassword, randomPassword, sessionUser, verifyPassword, type User,
 } from './auth.js';
 import type { Upstream, UpstreamManager, UpstreamRow } from './upstreams.js';
+import { seal } from './sealed.js';
 
 type Env = { Variables: { user: User & { csrf: string } } };
 const COOKIE = 'urumi_session';
@@ -90,7 +91,7 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     if (await one('select 1 from upstreams where slug = $1', [b.slug])) return bad(c, 409, `slug "${b.slug}" is taken`);
     const authHeader = b.credential ? (b.authHeader || 'Authorization') : null;
     const r = await one<UpstreamRow>(`insert into upstreams(slug, name, url, auth_header, credential, timeout_ms, created_by) values ($1,$2,$3,$4,$5,$6,$7) returning ${UP_COLS}`,
-      [b.slug, b.name, b.url, authHeader, b.credential || null, b.timeoutMs ?? null, c.get('user').id]);
+      [b.slug, b.name, b.url, authHeader, seal(b.credential), b.timeoutMs ?? null, c.get('user').id]);
     const u = mgr.upsert(r!);
     await waitSettled(u, 6000);
     return c.json(serverView(u), 201);
@@ -103,7 +104,7 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     if (!cur) return bad(c, 404, 'no such server');
     const next = {
       name: b.name ?? cur.name, url: b.url ?? cur.url, enabled: b.enabled ?? cur.enabled,
-      credential: b.credential === undefined ? cur.credential : (b.credential || null),
+      credential: b.credential === undefined ? cur.credential : seal(b.credential), // cur.credential is already sealed
       timeout_ms: b.timeoutMs === undefined ? cur.timeout_ms : b.timeoutMs,
       auth_header: b.authHeader === undefined ? cur.auth_header : b.authHeader,
     };

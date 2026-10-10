@@ -11,6 +11,7 @@ stringData:
   admin-password: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "admin-password" "gen" (randAlphaNum 20)) | quote }}
   key-pepper: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "key-pepper" "gen" (randAlphaNum 48)) | quote }}
   jwt-secret: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "jwt-secret" "gen" (randAlphaNum 48)) | quote }}
+  credential-key: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "credential-key" "gen" (randAlphaNum 48)) | quote }}
   llm-api-key: {{ .Values.gateway.llm.apiKey | default "none" | quote }}
 ---
 # Read-only, namespace-scoped: the gateway watches EndpointSlices to see an in-cluster upstream die in ~0.2 s.
@@ -66,6 +67,7 @@ spec:
             - { name: ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: gateway-app, key: admin-password } } }
             - { name: KEY_PEPPER, valueFrom: { secretKeyRef: { name: gateway-app, key: key-pepper } } }
             - { name: JWT_SECRET, valueFrom: { secretKeyRef: { name: gateway-app, key: jwt-secret } } }
+            - { name: CREDENTIAL_KEY, valueFrom: { secretKeyRef: { name: gateway-app, key: credential-key } } }
             - { name: ALLOWED_HOSTS, value: "gateway,gateway.{{ $ns }},gateway.{{ $ns }}.svc,gateway.{{ $ns }}.svc.cluster.local,127.0.0.1,localhost" }
             - { name: SSRF_ALLOW_HOSTS, value: {{ join "," .Values.gateway.ssrfAllowHosts | quote }} }
             - { name: K8S_WATCH_NAMESPACE, value: {{ $ns | quote }} }

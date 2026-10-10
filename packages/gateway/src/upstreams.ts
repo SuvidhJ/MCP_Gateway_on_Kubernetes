@@ -10,6 +10,7 @@ import { config } from './config.js';
 import { q } from './db.js';
 import { log } from './log.js';
 import { createGuardedAgent } from './ssrf.js';
+import { unseal } from './sealed.js';
 
 export type Status = 'connecting' | 'connected' | 'unreachable' | 'auth_failed' | 'disabled';
 /** Who may see and call a tool: everyone ('member'), admins only, or nobody ('off'). */
@@ -48,6 +49,10 @@ export function classify(e: any): 'auth' | 'hard' | 'soft' | 'other' {
 }
 export const errText = (e: any) => {
   const c = causeCode(e);
+  if (c === 'ESSRF') { // say what was blocked, not just "fetch failed"
+    const m = [e?.cause, e?.cause?.cause, e?.cause?.errors?.[0]].find((x) => x?.code === 'ESSRF')?.message;
+    if (m) return `${m} (blocked: private, loopback or metadata address; ask an admin to allow-list in-cluster hosts)`;
+  }
   return `${String(e?.message ?? e).slice(0, 200)}${c && !String(e?.message).includes(c) ? ` (${c})` : ''}`;
 };
 
@@ -83,8 +88,9 @@ export class UpstreamManager {
       status: 'connecting', era: null, protocolVersion: null, lastError: null, statusSince: new Date(), tools: [], access: new Map(),
       strikes: 0, retryMs: 0, busy: false, again: false, removed: false,
     };
-    const reconnect = !old || old.url !== r.url || old.authHeader !== r.auth_header || old.credential !== r.credential;
-    Object.assign(u, { slug: r.slug, name: r.name, url: r.url, authHeader: r.auth_header, credential: r.credential, enabled: r.enabled, timeoutMs: r.timeout_ms });
+    const credential = unseal(r.credential); // stored sealed; plaintext only in this process's memory
+    const reconnect = !old || old.url !== r.url || old.authHeader !== r.auth_header || old.credential !== credential;
+    Object.assign(u, { slug: r.slug, name: r.name, url: r.url, authHeader: r.auth_header, credential, enabled: r.enabled, timeoutMs: r.timeout_ms });
     this.ups.set(r.id, u);
     if (!u.enabled) {
       clearTimeout(u.timer);

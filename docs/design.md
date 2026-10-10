@@ -77,5 +77,5 @@ so upstream MCP servers accept traffic only from the gateway.
 | LLM | Ollama on the host GPU | hosted OpenAI-compatible free tier |
 
 Known limits: one gateway replica (the `list_changed` bus is in-process; multiple replicas need a shared bus such as
-Postgres `LISTEN/NOTIFY`); upstream credentials are stored in Postgres in plain text (protected by NetworkPolicy and
-the DB password; encryption at rest is the next hardening step).
+Postgres `LISTEN/NOTIFY`). Upstream credentials are sealed with AES-256-GCM before they reach Postgres (key in the
+`gateway-app` Secret), so a DB dump or backup alone doesn't leak them; anyone with both the DB and the Secret can.

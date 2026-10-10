@@ -133,7 +133,8 @@ image, so a store upgrade is an image tag change (back up MariaDB first: plugin 
   private/metadata ranges, admin allow-list for in-cluster names) — `packages/gateway/src/ssrf.ts`; least-privilege
   RBAC (read-only EndpointSlice Role) — `charts/urumi/templates/gateway.yaml`; default-deny NetworkPolicies —
   `charts/urumi/templates/networkpolicies.yaml`; non-root containers; Host/Origin checks on `/mcp`; signed tool
-  approvals in the chat (a client can't forge an approval).
+  approvals in the chat (a client can't forge an approval); **upstream credentials encrypted at rest** (AES-256-GCM,
+  key in the `gateway-app` Secret; the DB holds only `v1.<iv>.<tag>.<ciphertext>`) — `packages/gateway/src/sealed.ts`.
 - **Observability (partial):** upstream status history with the classified reason (refused / timeout / auth),
   structured JSON logs, audit outcomes (`timeout`, `unreachable`, `upstream_auth`, `tool_error`, …).
 
