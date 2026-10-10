@@ -9,7 +9,7 @@ COPY packages/woo-mcp/package.json packages/woo-mcp/
 COPY packages/demo-upstream/package.json packages/demo-upstream/
 COPY packages/gateway/package.json packages/gateway/
 COPY packages/dashboard/package.json packages/dashboard/
-RUN npm ci --no-audit --no-fund
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY packages packages
 ARG PKG
 RUN npm run build -w @urumi/shared --if-present \

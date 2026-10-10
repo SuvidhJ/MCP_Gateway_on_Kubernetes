@@ -39,6 +39,7 @@ export const config = {
   llmBaseUrl: process.env.LLM_BASE_URL ?? '',
   llmApiKey: process.env.LLM_API_KEY ?? 'none',
   llmModel: process.env.LLM_MODEL ?? 'qwen3.5-agent',
+  llmReasoningEffort: process.env.LLM_REASONING_EFFORT ?? 'none', // '' = don't send the parameter
   storeTimezone: process.env.STORE_TIMEZONE ?? 'UTC',
   dashboardDir: process.env.DASHBOARD_DIR ?? '../dashboard/dist',
   version: '0.1.0',
