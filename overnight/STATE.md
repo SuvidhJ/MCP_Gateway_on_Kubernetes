@@ -1,10 +1,12 @@
 # Overnight state (live; update after every meaningful step)
 
 ## Now
-- Window B (04:45-): M2 gateway, M3 dashboard, M4 chat, M5 chart (Postgres, gateway, NetworkPolicies, values-local/prod)
-  DONE. **`bash scripts/demo-check.sh` passes 23/23 in k3d `urumi-dev` (05:05)**, incl. chat approval round-trip
-  and "orders today" (store-timezone fix in woo-mcp + exact start-of-day bound in the chat prompt).
-- Next: `scripts/up.sh`, README (M6), browser check of the dashboard, then S-2/S-6.
+- Window B (04:45-): M2-M5 DONE, M6 docs DONE (README, docs/design.md, docs/threat-model.md, docs/api.md).
+  **From-scratch install (helm uninstall + delete ns + `bash scripts/up.sh --no-build`, 48 s) then
+  `bash scripts/demo-check.sh` = 25/25 PASS (05:13).** `scripts/ui-check.mjs` (headless Edge) = no console/network errors.
+  Claude Code 2.1.296 connected with URL + key only and ran a cross-server prompt (store + demo).
+- Stand-outs done: S-2 per-tool access; S-6 partial (SSRF guard, sealed credentials, NetworkPolicies, RBAC, non-root).
+- Next: tool-definition pinning (rug-pull quarantine), per-key rate limit, /metrics, docs/demo-script.md for the video.
 
 ## Done
 - git repo initialised (`main`), `.gitignore`, `.claude/settings.local.json` (broad allow + deny list).
