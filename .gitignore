@@ -1,0 +1,27 @@
+# deps / build output
+node_modules/
+dist/
+out/
+build/
+.vite/
+coverage/
+*.tsbuildinfo
+# logs
+*.log
+overnight/logs/
+overnight/pids.txt
+# secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+# downloads / caches
+images/wordpress/downloads/
+.cache/
+# local claude settings
+.claude/settings.local.json
+# os
+Thumbs.db
+.DS_Store

@@ -1,0 +1,92 @@
+# In-cluster spike for E3 (streams through Traefik), E17 (kill-pod detection) and E7 (NetworkPolicy).
+# kubectl apply -f k8s/spike.yaml   (image: `k3d image import urumi-spike:dev -c urumi`)
+apiVersion: v1
+kind: Namespace
+metadata: { name: exp }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: demo-upstream, namespace: exp, labels: { app: demo-upstream, role: upstream } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: demo-upstream } }
+  template:
+    metadata: { labels: { app: demo-upstream, role: upstream } }
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: upstream
+          image: urumi-spike:dev
+          imagePullPolicy: Never
+          env: [ { name: PORT, value: "8080" }, { name: NAME, value: demo } ]
+          ports: [ { containerPort: 8080, name: http } ]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2, failureThreshold: 1 }
+          resources: { requests: { cpu: 20m, memory: 48Mi }, limits: { memory: 256Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: demo-upstream, namespace: exp }
+spec: { selector: { app: demo-upstream }, ports: [ { port: 8080, targetPort: http, name: http } ] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ship-upstream, namespace: exp, labels: { app: ship-upstream, role: upstream } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: ship-upstream } }
+  template:
+    metadata: { labels: { app: ship-upstream, role: upstream } }
+    spec:
+      containers:
+        - name: upstream
+          image: urumi-spike:dev
+          imagePullPolicy: Never
+          env: [ { name: PORT, value: "8080" }, { name: NAME, value: shipping }, { name: TOKEN, value: s3cret } ]
+          ports: [ { containerPort: 8080, name: http } ]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2, failureThreshold: 1 }
+          resources: { requests: { cpu: 20m, memory: 48Mi }, limits: { memory: 256Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: ship-upstream, namespace: exp }
+spec: { selector: { app: ship-upstream }, ports: [ { port: 8080, targetPort: http, name: http } ] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: spike-gateway, namespace: exp, labels: { app: spike-gateway } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: spike-gateway } }
+  template:
+    metadata: { labels: { app: spike-gateway, role: gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: urumi-spike:dev
+          imagePullPolicy: Never
+          command: ["node", "spike/gateway.mjs"]
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: TICK_MS, value: "5000" }
+            - { name: ALLOW_PRIVATE_HOSTS, value: "demo-upstream.exp.svc.cluster.local,ship-upstream.exp.svc.cluster.local" }
+            - { name: CONNECT_TIMEOUT_MS, value: "2000" }
+            - { name: LOG, value: "/tmp/gw.jsonl" }
+            - name: UPSTREAMS
+              value: '[{"slug":"demo","url":"http://demo-upstream.exp.svc.cluster.local:8080/mcp"},{"slug":"shipping","url":"http://ship-upstream.exp.svc.cluster.local:8080/mcp","headers":{"Authorization":"Bearer s3cret"}}]'
+          ports: [ { containerPort: 8080, name: http } ]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: spike-gateway, namespace: exp }
+spec: { selector: { app: spike-gateway }, ports: [ { port: 80, targetPort: http, name: http } ] }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: spike-gateway, namespace: exp }
+spec:
+  rules:
+    - host: gw.127.0.0.1.nip.io
+      http:
+        paths: [ { path: /, pathType: Prefix, backend: { service: { name: spike-gateway, port: { number: 80 } } } } ]

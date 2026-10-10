@@ -1,0 +1,27 @@
+{
+  "name": "urumi-experiments",
+  "private": true,
+  "type": "module",
+  "description": "Throwaway spikes for round-6 experiments (E1-E18). Not product code.",
+  "dependencies": {
+    "@ai-sdk/mcp": "^2.0.73",
+    "@ai-sdk/openai-compatible": "^3.0.67",
+    "@langchain/core": "^1.2.17",
+    "@langchain/langgraph": "^1.4.21",
+    "@langchain/mcp-adapters": "^2.0.1",
+    "@langchain/openai": "^1.6.2",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "ai": "^7.0.137",
+    "langchain": "^1.5.16",
+    "undici": "8.11.2",
+    "zod": "4.6.5"
+  },
+  "overrides": {
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/inspector": "^2.10.1"
+  }
+}

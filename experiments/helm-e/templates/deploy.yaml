@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: helm-e }
+spec:
+  selector: { matchLabels: { app: helm-e } }
+  template:
+    metadata: { labels: { app: helm-e } }
+    spec:
+      containers:
+        - name: app
+          image: {{ .Values.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "spike/upstream.mjs"]
+          env: [ { name: PORT, value: "8080" } ]
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 2 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: helm-e }
+spec: { selector: { app: helm-e }, ports: [ { port: 8080 } ] }

@@ -1,0 +1,4 @@
+apiVersion: v2
+name: helm-e
+version: 0.1.0
+description: Helm 4 behaviour probe (lookup-stable secrets, install order, hooks, rollback-on-failure). Spike only.

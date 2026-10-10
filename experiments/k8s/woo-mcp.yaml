@@ -1,0 +1,32 @@
+# Spike WooCommerce MCP server in-cluster (role=upstream so the exp NetworkPolicies admit only gateways).
+apiVersion: v1
+kind: Secret
+metadata: { name: woo-mcp-store, namespace: exp }
+stringData: { ck: ck_e5rw000000000000000000000000000000000001, cs: cs_e5rw000000000000000000000000000000000002 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: woo-mcp, namespace: exp, labels: { app: woo-mcp } }
+spec:
+  selector: { matchLabels: { app: woo-mcp } }
+  template:
+    metadata: { labels: { app: woo-mcp, role: upstream } }
+    spec:
+      containers:
+        - name: woo-mcp
+          image: urumi-spike:dev
+          imagePullPolicy: Never
+          command: ["node", "spike/woo-mcp.mjs"]
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: STORE, value: "store" }
+            - { name: WC_URL, value: "http://wordpress.store.svc.cluster.local" }
+            - { name: WC_CK, valueFrom: { secretKeyRef: { name: woo-mcp-store, key: ck } } }
+            - { name: WC_CS, valueFrom: { secretKeyRef: { name: woo-mcp-store, key: cs } } }
+          ports: [ { containerPort: 8080, name: http } ]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: woo-mcp, namespace: exp }
+spec: { selector: { app: woo-mcp }, ports: [ { port: 8080, targetPort: http } ] }

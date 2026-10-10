@@ -1,0 +1,18 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: helm-e-post-install
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata: { labels: { role: hook } }
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: hook
+          image: {{ .Values.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "-e", "(async()=>{for(let i=1;i<=60;i++){try{const t=await (await fetch('http://helm-e:8080/healthz')).text();console.log('attempt',i,'hook saw app:',t);return}catch(e){await new Promise(r=>setTimeout(r,1000))}}process.exit(1)})()"]

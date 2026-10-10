@@ -1,0 +1,9 @@
+# Spike image for in-cluster experiments (E3/E17/E7). Not product code.
+FROM node:24.21.0-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+COPY spike ./spike
+USER node
+ENV NODE_ENV=production
+CMD ["node", "spike/upstream.mjs"]

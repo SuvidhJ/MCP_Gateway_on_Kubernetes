@@ -1,0 +1,66 @@
+# E3: two gateway variants behind Traefik (keep-alive 15 s vs keep-alive off), long call timeout.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gw-e3, namespace: exp }
+spec:
+  selector: { matchLabels: { app: gw-e3 } }
+  template:
+    metadata: { labels: { app: gw-e3, role: gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: urumi-spike:dev
+          imagePullPolicy: Never
+          command: ["node", "spike/gateway.mjs"]
+          env: &env
+            - { name: PORT, value: "8080" }
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: KEEPALIVE_MS, value: "15000" }
+            - { name: CALL_TIMEOUT_MS, value: "150000" }
+            - { name: TICK_MS, value: "30000" }
+            - { name: LOG, value: "/tmp/gw.jsonl" }
+            - { name: ALLOW_PRIVATE_HOSTS, value: "demo-upstream.exp.svc.cluster.local" }
+            - { name: UPSTREAMS, value: '[{"slug":"demo","url":"http://demo-upstream.exp.svc.cluster.local:8080/mcp"}]' }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gw-e3-noka, namespace: exp }
+spec:
+  selector: { matchLabels: { app: gw-e3-noka } }
+  template:
+    metadata: { labels: { app: gw-e3-noka, role: gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: urumi-spike:dev
+          imagePullPolicy: Never
+          command: ["node", "spike/gateway.mjs"]
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: KEEPALIVE_MS, value: "0" }
+            - { name: CALL_TIMEOUT_MS, value: "150000" }
+            - { name: TICK_MS, value: "30000" }
+            - { name: LOG, value: "/tmp/gw.jsonl" }
+            - { name: ALLOW_PRIVATE_HOSTS, value: "demo-upstream.exp.svc.cluster.local" }
+            - { name: UPSTREAMS, value: '[{"slug":"demo","url":"http://demo-upstream.exp.svc.cluster.local:8080/mcp"}]' }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gw-e3, namespace: exp }
+spec: { selector: { app: gw-e3 }, ports: [ { port: 80, targetPort: 8080 } ] }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gw-e3-noka, namespace: exp }
+spec: { selector: { app: gw-e3-noka }, ports: [ { port: 80, targetPort: 8080 } ] }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: gw-e3, namespace: exp }
+spec:
+  rules:
+    - host: e3.127.0.0.1.nip.io
+      http: { paths: [ { path: /, pathType: Prefix, backend: { service: { name: gw-e3, port: { number: 80 } } } } ] }
+    - host: e3noka.127.0.0.1.nip.io
+      http: { paths: [ { path: /, pathType: Prefix, backend: { service: { name: gw-e3-noka, port: { number: 80 } } } } ] }
