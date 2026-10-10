@@ -9,6 +9,7 @@ import {
 } from './auth.js';
 import type { Upstream, UpstreamManager, UpstreamRow } from './upstreams.js';
 import { seal } from './sealed.js';
+import { publish } from './events.js';
 
 type Env = { Variables: { user: User & { csrf: string } } };
 const COOKIE = 'urumi_session';
@@ -94,6 +95,7 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     const r = await one<UpstreamRow>(`insert into upstreams(slug, name, url, auth_header, credential, timeout_ms, created_by) values ($1,$2,$3,$4,$5,$6,$7) returning ${UP_COLS}`,
       [b.slug, b.name, b.url, authHeader, seal(b.credential), b.timeoutMs ?? null, c.get('user').id]);
     const u = mgr.upsert(r!);
+    publish({ t: 'upstream', id: u.id });
     await waitSettled(u, 6000);
     return c.json(serverView(u), 201);
   });
@@ -113,6 +115,7 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     const r = await one<UpstreamRow>(`update upstreams set name=$2, url=$3, enabled=$4, credential=$5, timeout_ms=$6, auth_header=$7 where id=$1 returning ${UP_COLS}`,
       [id, next.name, next.url, next.enabled, next.credential, next.timeout_ms, next.auth_header]);
     const u = mgr.upsert(r!);
+    publish({ t: 'upstream', id });
     if (u.enabled) await waitSettled(u, 4000);
     return c.json(serverView(u));
   });
@@ -120,6 +123,7 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     const id = Number(c.req.param('id'));
     await q('delete from upstreams where id = $1', [id]);
     mgr.remove(id);
+    publish({ t: 'upstream', id });
     return c.body(null, 204);
   });
   api.put('/servers/:id/tools/:tool/access', admin, async (c) => {
@@ -128,12 +132,14 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     const b = await body(c, z.object({ access: z.enum(['member', 'admin', 'off']) }));
     if (b instanceof Response) return b;
     await mgr.setAccess(u, c.req.param('tool'), b.access);
+    publish({ t: 'access', id: u.id, tool: c.req.param('tool') });
     return c.json(serverView(u));
   });
   api.post('/servers/:id/tools/:tool/approve', admin, async (c) => {
     const u = mgr.ups.get(Number(c.req.param('id')));
     if (!u) return bad(c, 404, 'no such server');
     if (!(await mgr.approveTool(u, c.req.param('tool')))) return bad(c, 404, 'no such tool');
+    publish({ t: 'pin', id: u.id, tool: c.req.param('tool') });
     return c.json(serverView(u));
   });
   api.get('/servers/:id/events', async (c) =>
@@ -173,6 +179,7 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     const rows = await q<{ id: number }>('update api_keys set revoked_at = now() where user_id = $1 and revoked_at is null returning id::int as id', [userId]);
     await q('delete from sessions where user_id = $1', [userId]);
     rows.forEach((r) => hooks.closeKeyStreams(r.id));
+    if (rows.length) publish({ t: 'revoke', keyIds: rows.map((r) => r.id) });
   }
 
   // ---- API keys ----
@@ -195,6 +202,7 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
       u.role === 'admin' ? [id] : [id, u.id]);
     if (!r) return bad(c, 404, 'no such key');
     hooks.closeKeyStreams(id);
+    publish({ t: 'revoke', keyIds: [id] });
     return c.body(null, 204);
   });
 

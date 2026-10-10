@@ -104,6 +104,19 @@ export function createGatewayMcp(mgr: UpstreamManager) {
     streams.delete(keyId);
   };
 
+  // Token buckets per caller (API key, or user for delegated chat tokens). In memory: per replica.
+  const buckets = new Map<string, { tokens: number; at: number }>();
+  const take = (id: string) => {
+    const now = Date.now();
+    const b = buckets.get(id) ?? { tokens: config.rateBurst, at: now };
+    b.tokens = Math.min(config.rateBurst, b.tokens + ((now - b.at) / 60_000) * config.ratePerMin);
+    b.at = now;
+    buckets.set(id, b);
+    if (b.tokens < 1) return Math.ceil(((1 - b.tokens) / config.ratePerMin) * 60);
+    b.tokens -= 1;
+    return 0;
+  };
+
   const json = (status: number, message: string, headers: Record<string, string> = {}) =>
     new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message }, id: null }), {
       status, headers: { 'content-type': 'application/json', ...headers },
@@ -120,6 +133,11 @@ export function createGatewayMcp(mgr: UpstreamManager) {
     if (!m) return json(401, 'Unauthorized: send "Authorization: Bearer <gateway API key>". Create a key in the dashboard.', { 'www-authenticate': 'Bearer realm="urumi"' });
     const principal = m[1].startsWith('urumi_') ? await principalFromKey(m[1]) : await principalFromJwt(m[1]);
     if (!principal) return json(401, 'Unauthorized: this API key is unknown, revoked, or its user is disabled.', { 'www-authenticate': 'Bearer realm="urumi", error="invalid_token"' });
+
+    if (req.method === 'POST') {
+      const wait = take(principal.keyId ? `key:${principal.keyId}` : `user:${principal.userId}`);
+      if (wait) return json(429, `Rate limit: ${config.ratePerMin} requests/minute per key (burst ${config.rateBurst}). Retry in ${wait}s.`, { 'retry-after': String(wait) });
+    }
 
     const res = await handler.fetch(req, { authInfo: { token: 'redacted', clientId: principal.email, scopes: [], extra: { principal } } });
     if (!principal.keyId || !res.body || !(res.headers.get('content-type') ?? '').includes('text/event-stream')) return res;

@@ -46,6 +46,10 @@ postgres:
 
 gateway:
   host: gateway          # -> gateway.<baseDomain>; serves /mcp, /api and the dashboard
+  # Replicas share Postgres; admin changes and key revocations propagate via LISTEN/NOTIFY, each replica keeps its
+  # own upstream connections and health loops, and MCP traffic is per-request, so any replica can serve any call.
+  replicas: 2
+  rateLimit: { perMinute: 120, burst: 40 }   # per API key, per replica (token bucket)
   adminEmail: admin@urumi.local
   callTimeoutMs: 30000   # default per-call upstream timeout (per-server override in the dashboard)
   # In-cluster hostnames the SSRF guard lets resolve to private addresses (everything else must be public).
