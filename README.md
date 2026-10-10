@@ -146,6 +146,10 @@ image, so a store upgrade is an image tag change (back up MariaDB first: plugin 
   `charts/urumi/templates/networkpolicies.yaml`; non-root containers; Host/Origin checks on `/mcp`; signed tool
   approvals in the chat (a client can't forge an approval); **upstream credentials encrypted at rest** (AES-256-GCM,
   key in the `gateway-app` Secret; the DB holds only `v1.<iv>.<tag>.<ciphertext>`) — `packages/gateway/src/sealed.ts`.
+- **Handling many tools:** connect to `/mcp?tools=search` and the gateway exposes two meta-tools instead of every
+  tool: `gateway__search_tools {query}` (ranked matches with their input schemas) and `gateway__call_tool {name,
+  arguments}`. A model facing hundreds of tools pays only for the few it looks up; authorization, quarantine,
+  routing and audit are identical (the audit log records the real tool). Code: `packages/gateway/src/mcp.ts`.
 - **Observability:** per-server *Last hour* column in the dashboard (calls, failures, p95 latency, from the audit log so
   it covers all replicas; `GET /api/stats`); Prometheus `/metrics` on port 9091 of each gateway pod (not routed by
   the Ingress): `urumi_tool_calls_total{server,outcome}`, `urumi_tool_call_duration_seconds` histogram,

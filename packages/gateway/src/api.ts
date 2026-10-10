@@ -34,7 +34,7 @@ async function body<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer
 const upstreamUrl = z.string().url().max(500).refine((s) => /^https?:\/\//.test(s), 'must be http(s)');
 const serverIn = z.object({
   name: z.string().trim().min(1).max(80),
-  slug: z.string().regex(/^[a-z][a-z0-9-]{1,30}$/, 'lowercase letters, digits, dashes (2-31 chars)').refine((s) => !s.includes('__'), 'no "__"'),
+  slug: z.string().regex(/^[a-z][a-z0-9-]{1,30}$/, 'lowercase letters, digits, dashes (2-31 chars)').refine((s) => !s.includes('__'), 'no "__"').refine((s) => s !== 'gateway', '"gateway" is reserved'),
   url: upstreamUrl,
   authHeader: z.string().regex(/^[A-Za-z0-9-]{1,64}$/).nullish(),
   credential: z.string().max(4000).nullish(),
