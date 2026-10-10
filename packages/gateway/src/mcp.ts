@@ -30,71 +30,108 @@ export function createGatewayMcp(mgr: UpstreamManager) {
     return a === 'member' || (a === 'admin' && p.role === 'admin');
   };
 
+  /** Route one tool call to its upstream with every check, audit it, and return an MCP result (never throws). */
+  async function invoke(p: Principal, full: string, args: Record<string, unknown> | undefined, signal: AbortSignal | undefined, era: string, client: string | null) {
+    const t0 = Date.now();
+    const i = full.indexOf('__');
+    const slug = i > 0 ? full.slice(0, i) : null;
+    const tool = i > 0 ? full.slice(i + 2) : full;
+    const u = slug ? mgr.bySlug(slug) : undefined;
+    let outcome = 'ok';
+    let error: string | null = null;
+    let result: any;
+    if (!u || (u.client && !u.tools.some((t) => t.name === tool))) {
+      outcome = 'unknown_tool';
+      result = errResult(`Tool ${full} does not exist on this gateway.`);
+    } else if (u.changed.has(tool)) {
+      outcome = 'quarantined';
+      result = errResult(`${full} changed its definition since an admin approved it, so it is disabled until an admin reviews the change.`);
+    } else if (!allowed(p, u, tool)) {
+      outcome = 'denied';
+      result = errResult(mgr.accessOf(u, tool) === 'off' ? `${full} is turned off by an administrator.` : `${full} is restricted to admins; your role is "${p.role}".`);
+    } else if (!u.enabled) {
+      outcome = 'disabled';
+      result = errResult(`Server "${u.name}" is disabled by an administrator; ${full} is unavailable.`);
+    } else if (u.status !== 'connected') {
+      outcome = u.status === 'auth_failed' ? 'upstream_auth' : 'unreachable';
+      result = errResult(`Server "${u.name}" is ${u.status === 'auth_failed' ? 'rejecting the gateway credential' : 'unreachable'}${u.lastError ? ` (${u.lastError})` : ''}. Other servers are unaffected.`);
+    } else {
+      try {
+        const r = await mgr.call(u, tool, args, signal);
+        mgr.success(u);
+        result = { content: r.content ?? [], ...(r.structuredContent ? { structuredContent: r.structuredContent } : {}), ...(r.isError ? { isError: true } : {}) };
+        if (r.isError) {
+          outcome = 'tool_error';
+          error = String(r.content?.[0]?.text ?? '').slice(0, 300);
+        }
+      } catch (e: any) {
+        const cls = classify(e);
+        outcome = cls === 'hard' ? 'unreachable' : cls === 'soft' ? 'timeout' : cls === 'auth' ? 'upstream_auth' : 'error';
+        if (cls !== 'other') mgr.failure(u, e, 'call');
+        error = errText(e);
+        const secs = (u.timeoutMs ?? config.callTimeoutMs) / 1000;
+        result = errResult(cls === 'soft' ? `Server "${u.name}" did not answer within ${secs}s; the call was cancelled. Other servers are unaffected.`
+          : cls === 'hard' ? `Server "${u.name}" is unreachable (${error}). Other servers are unaffected.`
+          : `Server "${u.name}" failed: ${e instanceof ProtocolError ? 'protocol error: ' : ''}${error}`);
+      }
+    }
+    recordCall(slug, outcome, Date.now() - t0);
+    await audit(p, slug, tool, Date.now() - t0, outcome, error ?? (outcome === 'ok' ? null : result.content[0].text), era, client);
+    return result;
+  }
+
+  const visible = (p: Principal) => mgr.catalog().filter((e) => allowed(p, e.u, e.t.name));
+  const toolDef = ({ u, t, name }: ReturnType<UpstreamManager['catalog']>[number]) => ({
+    name,
+    ...(t.title ? { title: t.title } : {}),
+    description: `[${u.name}] ${t.description ?? ''}`.trim(),
+    inputSchema: t.inputSchema,
+    ...(t.annotations ? { annotations: t.annotations } : {}),
+  });
+
+  // "Many tools" mode (/mcp?tools=search): instead of every tool, clients get two meta-tools, so a model facing
+  // hundreds of upstream tools only pays for the few it searches for. Same authorization, routing and audit.
+  const META_TOOLS: any[] = [
+    {
+      name: 'gateway__search_tools',
+      description: 'Search the tools available through this gateway (every connected server). Returns the best matches with their input schemas; then run one with gateway__call_tool.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'What you want to do, e.g. "list orders"' }, limit: { type: 'integer', minimum: 1, maximum: 20, default: 5 } }, required: ['query'] },
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: 'gateway__call_tool',
+      description: 'Run a tool found with gateway__search_tools. `name` is the exact tool name, `arguments` matches its input schema.',
+      inputSchema: { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object' } }, required: ['name'] },
+    },
+  ];
+  const search = (p: Principal, query: string, limit = 5) => {
+    const words = query.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 1);
+    const scored = visible(p).map((e) => {
+      const name = e.name.toLowerCase();
+      const desc = `${e.u.name} ${e.t.title ?? ''} ${e.t.description ?? ''}`.toLowerCase();
+      return { e, score: words.reduce((n, w) => n + (name.includes(w) ? 3 : 0) + (desc.includes(w) ? 1 : 0), 0) };
+    }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, Math.min(Math.max(limit, 1), 20));
+    const tools = scored.map(({ e }) => toolDef(e));
+    const hint = `No match. Servers: ${[...new Set(visible(p).map((e) => e.u.name))].join(', ')}`;
+    return { content: [{ type: 'text' as const, text: JSON.stringify(tools.length ? { tools } : { tools: [], hint }) }] };
+  };
+
   const handler = createMcpHandler(({ authInfo, era, requestInfo }) => {
     const p = authInfo!.extra!.principal as Principal;
+    const searchMode = requestInfo ? new URL(requestInfo.url).searchParams.get('tools') === 'search' : false;
     const s = new Server({ name: 'urumi-gateway', version: config.version }, {
       capabilities: { tools: { listChanged: true } },
       // tool lists are filtered per user, so never shared between callers
       cacheHints: { 'tools/list': { ttlMs: config.toolsTtlMs, cacheScope: 'private' } },
     } as any);
-    s.setRequestHandler('tools/list', async () => ({
-      tools: mgr.catalog().filter((e) => allowed(p, e.u, e.t.name)).map(({ u, t, name }) => ({
-        name,
-        ...(t.title ? { title: t.title } : {}),
-        description: `[${u.name}] ${t.description ?? ''}`.trim(),
-        inputSchema: t.inputSchema,
-        ...(t.annotations ? { annotations: t.annotations } : {}),
-      })),
-    }));
+    s.setRequestHandler('tools/list', async () => ({ tools: searchMode ? META_TOOLS : visible(p).map(toolDef) }));
     s.setRequestHandler('tools/call', async (req: any, ctx: any) => {
-      const t0 = Date.now();
-      const full: string = req.params.name;
-      const i = full.indexOf('__');
-      const slug = i > 0 ? full.slice(0, i) : null;
-      const tool = i > 0 ? full.slice(i + 2) : full;
-      const u = slug ? mgr.bySlug(slug) : undefined;
       const client = ctx?.mcpReq?.envelope?.['io.modelcontextprotocol/clientInfo']?.name ?? requestInfo?.headers.get('user-agent')?.slice(0, 80) ?? null;
-      let outcome = 'ok';
-      let error: string | null = null;
-      let result: any;
-      if (!u || (u.client && !u.tools.some((t) => t.name === tool))) {
-        outcome = 'unknown_tool';
-        result = errResult(`Tool ${full} does not exist on this gateway.`);
-      } else if (u.changed.has(tool)) {
-        outcome = 'quarantined';
-        result = errResult(`${full} changed its definition since an admin approved it, so it is disabled until an admin reviews the change.`);
-      } else if (!allowed(p, u, tool)) {
-        outcome = 'denied';
-        result = errResult(mgr.accessOf(u, tool) === 'off' ? `${full} is turned off by an administrator.` : `${full} is restricted to admins; your role is "${p.role}".`);
-      } else if (!u.enabled) {
-        outcome = 'disabled';
-        result = errResult(`Server "${u.name}" is disabled by an administrator; ${full} is unavailable.`);
-      } else if (u.status !== 'connected') {
-        outcome = u.status === 'auth_failed' ? 'upstream_auth' : 'unreachable';
-        result = errResult(`Server "${u.name}" is ${u.status === 'auth_failed' ? 'rejecting the gateway credential' : 'unreachable'}${u.lastError ? ` (${u.lastError})` : ''}. Other servers are unaffected.`);
-      } else {
-        try {
-          const r = await mgr.call(u, tool, req.params.arguments, ctx?.mcpReq?.signal);
-          mgr.success(u);
-          result = { content: r.content ?? [], ...(r.structuredContent ? { structuredContent: r.structuredContent } : {}), ...(r.isError ? { isError: true } : {}) };
-          if (r.isError) {
-            outcome = 'tool_error';
-            error = String(r.content?.[0]?.text ?? '').slice(0, 300);
-          }
-        } catch (e: any) {
-          const cls = classify(e);
-          outcome = cls === 'hard' ? 'unreachable' : cls === 'soft' ? 'timeout' : cls === 'auth' ? 'upstream_auth' : 'error';
-          if (cls !== 'other') mgr.failure(u, e, 'call');
-          error = errText(e);
-          const secs = (u.timeoutMs ?? config.callTimeoutMs) / 1000;
-          result = errResult(cls === 'soft' ? `Server "${u.name}" did not answer within ${secs}s; the call was cancelled. Other servers are unaffected.`
-            : cls === 'hard' ? `Server "${u.name}" is unreachable (${error}). Other servers are unaffected.`
-            : `Server "${u.name}" failed: ${e instanceof ProtocolError ? 'protocol error: ' : ''}${error}`);
-        }
-      }
-      recordCall(slug, outcome, Date.now() - t0);
-      await audit(p, slug, tool, Date.now() - t0, outcome, error ?? (outcome === 'ok' ? null : result.content[0].text), era, client);
-      return result;
+      const name: string = req.params.name;
+      const args = req.params.arguments ?? {};
+      if (searchMode && name === 'gateway__search_tools') return search(p, String(args.query ?? ''), Number(args.limit ?? 5));
+      if (searchMode && name === 'gateway__call_tool') return invoke(p, String(args.name ?? ''), args.arguments, ctx?.mcpReq?.signal, era, client);
+      return invoke(p, name, args, ctx?.mcpReq?.signal, era, client);
     });
     return s;
   }, { keepAliveMs: 15_000, onerror: (e) => log.debug({ err: e.message }, 'mcp handler') });

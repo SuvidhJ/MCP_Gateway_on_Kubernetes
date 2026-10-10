@@ -86,6 +86,14 @@ expect 0 "orders question as bob (store__list_orders)" "$BOB_KEY" store__list_or
 expect 0 "second server in the same flow (deepwiki__read_wiki_structure)" "$BOB_KEY" deepwiki__read_wiki_structure '{"repoName":"woocommerce/woocommerce"}'
 MODE=legacy expect 0 "2025-era (legacy) client also works" "$BOB_KEY" demo__echo '{"message":"legacy"}'
 
+echo "== 3b. (stand-out) many-tools mode: /mcp?tools=search exposes search + call meta-tools"
+GS="$G"
+$NODE scripts/mcp-call.mjs "$GS/mcp?tools=search" --list '{}' "$BOB_KEY" >"$TMP/mcp.out" 2>&1
+[ "$(grep -c '^gateway__' "$TMP/mcp.out")" = 2 ] && ok "search mode lists only the 2 meta-tools" || bad "search mode list: $(head -c 200 "$TMP/mcp.out")"
+$NODE scripts/mcp-call.mjs "$GS/mcp?tools=search" gateway__search_tools '{"query":"list orders"}' "$BOB_KEY" >"$TMP/mcp.out" 2>&1
+grep -q 'store__list_orders' "$TMP/mcp.out" && ok "search finds store__list_orders" || bad "search: $(head -c 200 "$TMP/mcp.out")"
+$NODE scripts/mcp-call.mjs "$GS/mcp?tools=search" gateway__call_tool '{"name":"store__list_orders","arguments":{}}' "$BOB_KEY" >"$TMP/mcp.out" 2>&1 && ok "call_tool runs it (exit 0)" || bad "call_tool: $(head -c 200 "$TMP/mcp.out")"
+
 echo "== 4. revoke bob's key -> next call rejected"
 api "$TMP/bob" "$BOB_CSRF" DELETE "/keys/$BOB_KEYID" >/dev/null
 expect 3 "bob's next call is rejected" "$BOB_KEY" --list
