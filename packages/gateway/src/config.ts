@@ -8,6 +8,7 @@ const num = (k: string, d: number) => Number(process.env[k] ?? d);
 
 export const config = {
   port: num('PORT', 8080),
+  metricsPort: num('METRICS_PORT', 9091), // Prometheus /metrics, not routed by the Ingress (0 = off)
   databaseUrl: env('DATABASE_URL', 'postgres://urumi:urumi@127.0.0.1:5432/urumi'),
   // Public origin of the gateway (Host/Origin guard, mcpUrl shown in the dashboard).
   publicUrl: env('PUBLIC_URL', 'http://gateway.127.0.0.1.nip.io:8080'),

@@ -1,6 +1,6 @@
 import { Fragment, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api, type Server, type ServerEvent, type Tool, type ToolAccess } from '../api';
+import { api, type Server, type ServerEvent, type ServerStats, type Tool, type ToolAccess } from '../api';
 import { Badge, ErrorText, StatusBadge, Time, useAction, useIsAdmin } from '../ui';
 
 const SERVERS = ['servers'];
@@ -15,6 +15,8 @@ export function Servers() {
   const admin = useIsAdmin();
   const [adding, setAdding] = useState(false);
   const servers = useQuery({ queryKey: SERVERS, queryFn: () => api<Server[]>('/api/servers'), refetchInterval: 2000 });
+  const stats = useQuery({ queryKey: ['stats'], queryFn: () => api<ServerStats[]>('/api/stats'), refetchInterval: 5000 });
+  const statsBySlug = new Map((stats.data ?? []).map((x) => [x.server, x]));
 
   return (
     <>
@@ -36,17 +38,18 @@ export function Servers() {
               <th>Status</th>
               <th>Protocol</th>
               <th className="num">Tools</th>
+              <th title="Tool calls through the gateway in the last hour (failures = unreachable, timeout, denied…; p95 latency)">Last hour</th>
               <th>Status since</th>
               <th>Last error</th>
               {admin && <th className="actions">Actions</th>}
             </tr>
           </thead>
           <tbody>
-            {servers.data?.map((s) => <ServerRow key={s.id} server={s} admin={admin} />)}
+            {servers.data?.map((s) => <ServerRow key={s.id} server={s} admin={admin} stats={statsBySlug.get(s.slug)} />)}
             {servers.data?.length === 0 && (
-              <tr><td colSpan={8} className="empty">No servers registered yet.</td></tr>
+              <tr><td colSpan={9} className="empty">No servers registered yet.</td></tr>
             )}
-            {servers.isPending && <tr><td colSpan={8} className="empty">Loading…</td></tr>}
+            {servers.isPending && <tr><td colSpan={9} className="empty">Loading…</td></tr>}
           </tbody>
         </table>
       </div>
@@ -56,12 +59,12 @@ export function Servers() {
 
 type Panel = 'tools' | 'edit' | 'history' | null;
 
-function ServerRow({ server: s, admin }: { server: Server; admin: boolean }) {
+function ServerRow({ server: s, admin, stats }: { server: Server; admin: boolean; stats?: ServerStats }) {
   const [panel, setPanel] = useState<Panel>(null);
   const toggle = (p: Panel) => setPanel((cur) => (cur === p ? null : p));
   const patch = useAction((body: Partial<Server>) => api(`/api/servers/${s.id}`, { method: 'PATCH', body }), [SERVERS]);
   const del = useAction(() => api(`/api/servers/${s.id}`, { method: 'DELETE' }), [SERVERS]);
-  const cols = admin ? 8 : 7;
+  const cols = admin ? 9 : 8;
 
   return (
     <Fragment>
@@ -83,6 +86,14 @@ function ServerRow({ server: s, admin }: { server: Server; admin: boolean }) {
         <td className="num">
           {s.tools.length}
           {s.tools.some((t) => t.changed) && <div><Badge tone="red" title="A tool changed its definition">review</Badge></div>}
+        </td>
+        <td>
+          {stats ? (
+            <>
+              <div>{stats.calls} call{stats.calls === 1 ? '' : 's'}{stats.failures > 0 && <span className="err-text"> · {stats.failures} failed</span>}</div>
+              <div className="sub">p95 {stats.p95} ms</div>
+            </>
+          ) : <span className="muted">—</span>}
         </td>
         <td><Time iso={s.statusSince} relative /></td>
         <td className="err-cell" title={s.lastError ?? undefined}>{s.lastError ?? <span className="muted">—</span>}</td>

@@ -206,6 +206,20 @@ export function createApi(mgr: UpstreamManager, hooks: { closeKeyStreams: (keyId
     return c.body(null, 204);
   });
 
+  // ---- per-server activity, last hour (from the audit log, so it covers every replica) ----
+  api.get('/stats', async (c) => {
+    const u = c.get('user');
+    const rows = await q(`select server, count(*)::int as calls,
+        count(*) filter (where outcome not in ('ok','tool_error'))::int as failures,
+        count(*) filter (where outcome = 'tool_error')::int as "toolErrors",
+        round(percentile_cont(0.5) within group (order by duration_ms))::int as p50,
+        round(percentile_cont(0.95) within group (order by duration_ms))::int as p95,
+        max(at) as "lastCall"
+      from audit_log where at > now() - interval '1 hour' ${u.role === 'admin' ? '' : 'and user_id = $1'}
+      group by server order by server`, u.role === 'admin' ? [] : [u.id]);
+    return c.json(rows);
+  });
+
   // ---- audit ----
   api.get('/audit', async (c) => {
     const u = c.get('user');

@@ -43,6 +43,9 @@ export interface Server {
   authHeader: string | null;
   tools: Tool[];
 }
+/** Per-server activity in the last hour (from the audit log; members see their own calls only). */
+export interface ServerStats { server: string | null; calls: number; failures: number; toolErrors: number; p50: number; p95: number; lastCall: string }
+
 export interface ServerEvent { at: string; status: ServerStatus; error: string | null }
 
 export interface Member { id: string; email: string; name: string; role: Role; disabled: boolean; createdAt: string }

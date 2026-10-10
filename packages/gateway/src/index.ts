@@ -20,6 +20,7 @@ import { chat } from './chat.js';
 import { startEndpointWatch } from './k8s.js';
 import { seal } from './sealed.js';
 import { subscribe } from './events.js';
+import { startMetricsServer } from './metrics.js';
 
 await waitForDb();
 await migrate();
@@ -38,6 +39,7 @@ mgr.onToolsChanged = () => {
 };
 await mgr.load();
 startEndpointWatch(mgr, config.k8sNamespace);
+startMetricsServer(mgr, config.metricsPort);
 // Other replicas' admin changes and key revocations (several gateway replicas share one Postgres).
 subscribe(async (ev) => {
   if (ev.t === 'upstream') await mgr.reloadUpstream(ev.id);
