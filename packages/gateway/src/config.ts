@@ -22,12 +22,16 @@ export const config = {
   cookieSecure: process.env.COOKIE_SECURE === '1',
   sessionHours: num('SESSION_HOURS', 12),
   // Upstream behaviour (planning/08-decisions.md, CLAUDE.md "hard-won facts").
-  connectTimeoutMs: num('CONNECT_TIMEOUT_MS', 2000),
+  connectTimeoutMs: num('CONNECT_TIMEOUT_MS', 2000),          // in-cluster upstreams (TCP)
+  externalConnectTimeoutMs: num('EXTERNAL_CONNECT_TIMEOUT_MS', 5000), // internet upstreams (TCP + TLS)
   callTimeoutMs: num('CALL_TIMEOUT_MS', 30_000),
   probeTimeoutMs: num('PROBE_TIMEOUT_MS', 8000),
   tickMs: num('TICK_MS', 5000),
   strikes: num('STRIKES', 3),
   toolsTtlMs: num('TOOLS_TTL_MS', 5000),
+  // Per-key (per-user for the chat) MCP request rate limit: token bucket, `rateBurst` requests, refilled at `ratePerMin`.
+  ratePerMin: num('RATE_PER_MIN', 120),
+  rateBurst: num('RATE_BURST', 40),
   // Hostnames the SSRF guard lets resolve to private addresses (in-cluster upstreams the admin registers).
   ssrfAllowHosts: env('SSRF_ALLOW_HOSTS', 'woo-mcp,woo-mcp.urumi.svc.cluster.local,demo-upstream,demo-upstream.urumi.svc.cluster.local,127.0.0.1,localhost')
     .split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),

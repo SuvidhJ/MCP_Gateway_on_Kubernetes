@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { Client, StreamableHTTPClientTransport, SdkHttpError, SdkError } from '@modelcontextprotocol/client';
 import { fetch as undiciFetch } from 'undici';
 import { config } from './config.js';
-import { q } from './db.js';
+import { one, q } from './db.js';
 import { log } from './log.js';
 import { createGuardedAgent } from './ssrf.js';
 import { unseal } from './sealed.js';
@@ -30,7 +30,7 @@ export interface Upstream {
   busy: boolean; again: boolean; removed: boolean;
 }
 
-const dispatcher = createGuardedAgent({ allowHosts: config.ssrfAllowHosts, timeout: config.connectTimeoutMs, guard: config.ssrfGuard });
+const dispatcher = createGuardedAgent({ allowHosts: config.ssrfAllowHosts, timeout: config.connectTimeoutMs, externalTimeout: config.externalConnectTimeoutMs, guard: config.ssrfGuard });
 const baseFetch = ((url: any, init: any) => undiciFetch(url, { ...init, dispatcher })) as unknown as typeof fetch;
 // Deadline on every POST below the SDK (so an SDK timeout bug can't hang us). GET listen streams are untouched.
 const deadlineFetch = (ms: number): typeof fetch => (url, init = {}) => {
@@ -68,14 +68,52 @@ export class UpstreamManager {
   /** Called when the aggregated tool list may have changed (status flip, tools changed, add/remove). */
   onToolsChanged: () => void = () => {};
 
+  /** Load (or re-sync after a missed event) all servers, access rules and pins from the database. */
   async load() {
     const rows = await q<UpstreamRow>('select id::int as id, slug, name, url, auth_header, credential, enabled, timeout_ms from upstreams order by id');
     const policies = await q<{ upstream_id: number; tool: string; access: Access }>('select upstream_id::int as upstream_id, tool, access from tool_policies');
     const pins = await q<{ upstream_id: number; tool: string; hash: string; description: string | null }>('select upstream_id::int as upstream_id, tool, hash, description from tool_pins');
     // all synchronous from here, so pins are in place before any probe can deliver a tool list
-    for (const r of rows) this.upsert(r);
+    for (const id of [...this.ups.keys()]) if (!rows.some((r) => r.id === id)) this.remove(id);
+    for (const r of rows) {
+      const u = this.upsert(r);
+      u.access.clear();
+      u.pins.clear();
+    }
     for (const p of policies) this.ups.get(p.upstream_id)?.access.set(p.tool, p.access);
     for (const p of pins) this.ups.get(p.upstream_id)?.pins.set(p.tool, { hash: p.hash, description: p.description });
+    for (const u of this.ups.values()) this.recheckPins(u);
+    this.onToolsChanged();
+  }
+
+  // ---- applying another replica's change (events.ts) ----
+  async reloadUpstream(id: number) {
+    const r = await one<UpstreamRow>('select id::int as id, slug, name, url, auth_header, credential, enabled, timeout_ms from upstreams where id = $1', [id]);
+    if (r) this.upsert(r);
+    else this.remove(id);
+  }
+  async reloadAccess(id: number, tool: string) {
+    const u = this.ups.get(id);
+    if (!u) return;
+    const r = await one<{ access: Access }>('select access from tool_policies where upstream_id = $1 and tool = $2', [id, tool]);
+    if (r) u.access.set(tool, r.access);
+    else u.access.delete(tool);
+    this.onToolsChanged();
+  }
+  async reloadPin(id: number, tool: string) {
+    const u = this.ups.get(id);
+    if (!u) return;
+    const r = await one<{ hash: string; description: string | null }>('select hash, description from tool_pins where upstream_id = $1 and tool = $2', [id, tool]);
+    if (r) u.pins.set(tool, r);
+    this.recheckPins(u);
+    this.onToolsChanged();
+  }
+  private recheckPins(u: Upstream) {
+    for (const t of u.tools) {
+      const pin = u.pins.get(t.name);
+      if (pin && pin.hash !== toolHash(t)) u.changed.add(t.name);
+      else u.changed.delete(t.name);
+    }
   }
 
   /** An admin accepts a changed tool definition: re-pin it and make the tool available again. */

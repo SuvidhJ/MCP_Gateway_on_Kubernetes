@@ -45,7 +45,7 @@ metadata:
   name: gateway
   labels: {{- include "urumi.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.gateway.replicas }}
   selector: { matchLabels: { app: gateway } }
   template:
     metadata:
@@ -73,6 +73,8 @@ spec:
             - { name: K8S_WATCH_NAMESPACE, value: {{ $ns | quote }} }
             - { name: SEED_SERVERS, value: {{ .Values.gateway.seedServers | toJson | quote }} }
             - { name: CALL_TIMEOUT_MS, value: {{ .Values.gateway.callTimeoutMs | quote }} }
+            - { name: RATE_PER_MIN, value: {{ .Values.gateway.rateLimit.perMinute | quote }} }
+            - { name: RATE_BURST, value: {{ .Values.gateway.rateLimit.burst | quote }} }
             - { name: LLM_BASE_URL, value: {{ .Values.gateway.llm.baseUrl | quote }} }
             - { name: LLM_MODEL, value: {{ .Values.gateway.llm.model | quote }} }
             - { name: LLM_REASONING_EFFORT, value: {{ .Values.gateway.llm.reasoningEffort | quote }} }

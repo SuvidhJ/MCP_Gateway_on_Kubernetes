@@ -33,7 +33,10 @@ export function isBlocked(ip: string) {
 }
 const ssrfError = (msg: string) => Object.assign(new Error(`SSRF guard: ${msg}`), { code: 'ESSRF' });
 
-export function createGuardedAgent({ allowHosts = [] as string[], timeout = 2000, guard = true } = {}) {
+// `timeout` covers TCP + TLS. In-cluster (allow-listed) hosts get the short one (a SYN dropped during kube-proxy
+// rule changes must fail fast); internet hosts get `externalTimeout`, since a TLS handshake on a slow link can
+// take longer than 2 s and would make a healthy external server flap.
+export function createGuardedAgent({ allowHosts = [] as string[], timeout = 2000, externalTimeout = 5000, guard = true } = {}) {
   const allow = new Set(allowHosts.map((h) => h.toLowerCase().replace(/\.$/, '')));
   const checkedLookup = (hostname: string, opts: any, cb: any) => {
     dns.lookup(hostname, { ...opts, all: true }, (err, addrs: dns.LookupAddress[]) => {
@@ -43,12 +46,14 @@ export function createGuardedAgent({ allowHosts = [] as string[], timeout = 2000
       opts.all ? cb(null, addrs) : cb(null, addrs[0].address, addrs[0].family);
     });
   };
-  const guarded = buildConnector({ lookup: checkedLookup as any, timeout });
+  const guarded = buildConnector({ lookup: checkedLookup as any, timeout: externalTimeout });
   const trusted = buildConnector({ timeout });
+  const unguarded = buildConnector({ timeout: externalTimeout });
   return new Agent({
     connect: (opts, cb) => {
       const host = String(opts.hostname ?? '').replace(/^\[|\]$/g, '').toLowerCase();
-      if (!guard || allow.has(host.replace(/\.$/, ''))) return trusted(opts, cb);
+      if (allow.has(host.replace(/\.$/, ''))) return trusted(opts, cb);
+      if (!guard) return unguarded(opts, cb);
       if (!host) return cb(ssrfError('empty host'), null);
       if (net.isIP(host)) return isBlocked(host) ? cb(ssrfError(`literal ${host} blocked`), null) : guarded(opts, cb);
       return guarded(opts, cb);
