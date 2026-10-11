@@ -8,6 +8,8 @@
 //   env: UI_URL (default http://gateway.127.0.0.1.nip.io:8080), UI_EMAIL (default admin@urumi.local),
 //        UI_PASSWORD (default: read from secret gateway-app via kubectl, context UI_KUBE_CONTEXT=k3d-urumi-dev),
 //        UI_BROWSER (path to msedge/chrome), UI_OUT (default out/ui)
+//        UI_CHAT=1 also runs the chat scenario (needs the LLM; ~1-3 min): a write tool through the approval
+//        card (chat-approval.png, chat-done.png) and a read-only question (chat-orders.png).
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -77,6 +79,114 @@ class Cdp {
   }
   on(method, fn) { (this.handlers.get(method) ?? this.handlers.set(method, []).get(method)).push(fn); }
   close() { try { this.ws.close(); } catch { /* ignore */ } }
+}
+
+// ---- chat scenario (UI_CHAT=1) ----
+// Reads the DOM of packages/dashboard/src/pages/Chat.tsx: while useChat is busy the form shows a "Stop" button
+// instead of "Send"; "submitted" also renders `.thinking`; a pending write tool renders `.tool-card.approval`;
+// a request error renders `.chat-log > .error`.
+const CHAT_STATE = `(() => {
+  const log = document.querySelector('.chat-log');
+  const form = document.querySelector('form.chat-input');
+  const msgs = [...document.querySelectorAll('.chat-log .msg')];
+  const last = msgs[msgs.length - 1];
+  const lastPart = last?.querySelector('.msg-body')?.lastElementChild;
+  return {
+    busy: !!form && [...form.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Stop'),
+    thinking: !!document.querySelector('.chat-log .thinking'),
+    approval: !!document.querySelector('.tool-card.approval'),
+    error: document.querySelector('.chat-log > .error')?.textContent ?? null,
+    lastIsAssistant: !!last?.classList.contains('msg-assistant'),
+    endsWithText: !!lastPart && lastPart.classList.contains('msg-text') && lastPart.textContent.trim().length > 0,
+    tools: [...document.querySelectorAll('.chat-log .tool-card')].map((c) => ({
+      name: c.querySelector('.tool-head code')?.textContent, state: c.className.replace('tool-card', '').trim() })),
+    text: log?.innerText ?? '',
+  };
+})()`;
+
+async function chatScenario({ evaluate, waitFor, shot, fill, note, setPhase }) {
+  const state = () => evaluate(CHAT_STATE);
+  // Waits until `done(s)` holds and the chat-log text has been unchanged for `stableMs`.
+  const waitChat = async (what, done, timeout = 120_000, stableMs = 3000) => {
+    const t0 = Date.now();
+    let lastText = null, since = Date.now();
+    while (Date.now() - t0 < timeout) {
+      const s = await state();
+      if (s.error) throw new Error(`chat error while waiting for ${what}: ${s.error}`);
+      if (s.text !== lastText) { lastText = s.text; since = Date.now(); }
+      if (done(s) && Date.now() - since >= stableMs) return { s, ms: Date.now() - t0 };
+      await sleep(250);
+    }
+    const s = await state();
+    throw new Error(`timed out after ${timeout / 1000}s waiting for ${what} (busy=${s.busy} approval=${s.approval} tools=${JSON.stringify(s.tools)})`);
+  };
+  const send = async (text) => {
+    await waitFor(`document.querySelector('form.chat-input textarea:not([disabled])')`, 'enabled chat input');
+    await fill('form.chat-input textarea', text);
+    await waitFor(`[...document.querySelectorAll('form.chat-input button')].some((b) => b.textContent.trim() === 'Send' && !b.disabled)`, 'Send enabled');
+    await evaluate(`[...document.querySelectorAll('form.chat-input button')].find((b) => b.textContent.trim() === 'Send').click()`);
+    console.log(`  sent: ${text}`);
+  };
+  // For screenshots: expand Input/Output of tool cards and let the log grow so the full-page shot holds the
+  // whole transcript (in the real UI the log scrolls).
+  const prepShot = () => evaluate(`(() => {
+    document.querySelectorAll('.chat-log .tool-card details').forEach((d) => { d.open = true; });
+    const log = document.querySelector('.chat-log'); if (log) log.style.maxHeight = 'none';
+    window.scrollTo(0, 0); // else the sticky topbar is captured mid-page
+    return true;
+  })()`).then(() => sleep(300));
+  const lastAnswer = () => evaluate(`[...document.querySelectorAll('.chat-log .msg-assistant')].pop()?.querySelector('.msg-body')?.lastElementChild?.textContent ?? ''`);
+  const answered = (s) => !s.busy && !s.thinking && !s.approval && s.lastIsAssistant;
+
+  setPhase('chat');
+  await evaluate(`location.hash = '#/chat'`);
+  await waitFor(`document.querySelector('form.chat-input textarea')`, 'chat page', 15_000);
+  const startAudit = await evaluate(`fetch('/api/audit?limit=1').then((r) => r.json()).then((j) => j.items[0]?.id ?? 0)`);
+
+  // 1. write tool -> approval card
+  setPhase('chat-approval');
+  await send('Create a product called "UI Check Lamp" priced 799 and publish it.');
+  const a = await waitChat('approval card', (s) => s.approval && !s.busy, 120_000, 1000);
+  const pending = await evaluate(`(() => { const c = document.querySelector('.tool-card.approval');
+    return { name: c.querySelector('code')?.textContent, input: c.querySelector('pre')?.textContent }; })()`);
+  console.log(`  approval card after ${(a.ms / 1000).toFixed(1)}s: ${pending.name} ${pending.input?.replace(/\s+/g, ' ')}`);
+  if (!/create_product/.test(pending.name ?? '')) note('chat', `approval card is for ${pending.name}, expected *create_product`);
+  await prepShot();
+  await shot('chat-approval');
+
+  // 2. approve -> tool runs -> final text
+  setPhase('chat-done');
+  const approved = await evaluate(`(() => { const b = [...document.querySelectorAll('.tool-card.approval button')].find((x) => x.textContent.trim() === 'Approve');
+    if (!b) return false; b.click(); return true; })()`);
+  if (!approved) throw new Error('no Approve button');
+  const d = await waitChat('final answer after approval',
+    (s) => answered(s) && s.tools.some((t) => /create_product/.test(t.name ?? '') && /output-(available|error)/.test(t.state)));
+  console.log(`  answer after ${(d.ms / 1000).toFixed(1)}s; tools: ${d.s.tools.map((t) => `${t.name}[${t.state}]`).join(' ')}`);
+  if (!d.s.endsWithText) note('chat', 'assistant ended the create turn without any text');
+  if (d.s.tools.some((t) => /output-error/.test(t.state))) note('chat', `a tool call failed: ${JSON.stringify(d.s.tools)}`);
+  console.log(`  answer: ${(await lastAnswer()).replace(/\s+/g, ' ').slice(0, 200)}`);
+  await prepShot();
+  await shot('chat-done');
+
+  // 3. read-only question -> answer without approval
+  setPhase('chat-orders');
+  const before = d.s.tools.length;
+  await send('What orders came in today?');
+  const o = await waitChat('orders answer', (s) => answered(s) || s.approval);
+  if (o.s.approval) throw new Error('read-only orders question produced an approval card');
+  if (o.s.tools.length === before) note('chat', 'orders question answered without calling a tool');
+  console.log(`  answer after ${(o.ms / 1000).toFixed(1)}s; new tools: ${o.s.tools.slice(before).map((t) => `${t.name}[${t.state}]`).join(' ')}`);
+  if (!o.s.endsWithText) note('chat', 'assistant ended the orders turn without any text');
+  console.log(`  answer: ${(await lastAnswer()).replace(/\s+/g, ' ').slice(0, 200)}`);
+  await prepShot();
+  await shot('chat-orders');
+
+  // 4. the calls are in the audit log as the logged-in user, via "chat"
+  setPhase('chat-audit');
+  const rows = await evaluate(`fetch('/api/audit?limit=20').then((r) => r.json()).then((j) => j.items.filter((i) => i.id > ${startAudit}))`);
+  for (const r of rows) console.log(`  audit #${r.id} ${r.userEmail} via=${r.via} ${r.server}/${r.tool} ${r.outcome} ${r.durationMs}ms`);
+  if (!rows.some((r) => /create_product/.test(r.tool) && r.via === 'chat' && r.userEmail === EMAIL)) note('chat', `no audit row for create_product via chat by ${EMAIL}`);
+  if (!rows.some((r) => /order/.test(r.tool) && r.via === 'chat' && r.userEmail === EMAIL)) note('chat', `no audit row for an orders tool via chat by ${EMAIL}`);
 }
 
 async function main() {
@@ -240,6 +350,8 @@ async function main() {
       console.log('Revoked key ui-check');
       await shot('keys-revoked');
     }
+
+    if (process.env.UI_CHAT === '1') await chatScenario({ evaluate, waitFor, shot, fill, clickByText, note, setPhase: (p) => { phase = p; } });
     phase = 'end';
     await sleep(500);
   } finally {

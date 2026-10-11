@@ -16,6 +16,8 @@ spec:
   template:
     metadata: { labels: { app: mariadb } }
     spec:
+      # start directly as the image's mysql user (999) instead of root + gosu
+      securityContext: { runAsUser: 999, runAsGroup: 999, runAsNonRoot: true, fsGroup: 999, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: mariadb
           image: {{ .Values.images.mariadb }}
@@ -29,6 +31,7 @@ spec:
           readinessProbe: { exec: { command: ["healthcheck.sh", "--connect", "--innodb_initialized"] }, periodSeconds: 5 }
           livenessProbe: { exec: { command: ["healthcheck.sh", "--connect"] }, periodSeconds: 20, initialDelaySeconds: 30 }
           resources: {{- toYaml .Values.mariadb.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
           volumeMounts: [ { name: data, mountPath: /var/lib/mysql } ]
       volumes: [ { name: data, persistentVolumeClaim: { claimName: mariadb } } ]
 ---
