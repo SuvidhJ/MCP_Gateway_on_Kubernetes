@@ -2,8 +2,17 @@
   "name": "urumi-mcp-gateway",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/shared", "packages/woo-mcp", "packages/demo-upstream", "packages/gateway", "packages/dashboard"],
-  "engines": { "node": ">=24.7" },
+  "workspaces": [
+    "packages/shared",
+    "packages/woo-mcp",
+    "packages/demo-upstream",
+    "packages/provisioner",
+    "packages/gateway",
+    "packages/dashboard"
+  ],
+  "engines": {
+    "node": ">=24.7"
+  },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",

@@ -7,6 +7,7 @@ COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/woo-mcp/package.json packages/woo-mcp/
 COPY packages/demo-upstream/package.json packages/demo-upstream/
+COPY packages/provisioner/package.json packages/provisioner/
 COPY packages/gateway/package.json packages/gateway/
 COPY packages/dashboard/package.json packages/dashboard/
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
