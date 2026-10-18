@@ -10,7 +10,8 @@ try {
   await c.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } }));
   if (tool === '--list') {
     const { tools } = await c.listTools(undefined, { cacheMode: 'bypass' });
-    console.log(tools.map((t) => t.name).join('\n'));
+    // DESC=1: name<TAB>description
+    console.log(tools.map((t) => (process.env.DESC ? `${t.name}\t${t.description ?? ''}` : t.name)).join('\n'));
   } else {
     const r = await c.callTool({ name: tool, arguments: JSON.parse(args) });
     console.log(r.isError ? 'isError' : 'ok', r.content?.[0]?.text?.slice(0, Number(process.env.MAX ?? 600)));
