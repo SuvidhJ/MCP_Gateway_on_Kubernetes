@@ -82,7 +82,131 @@ const MIGRATIONS: string[] = [
      description text,
      approved_at timestamptz not null default now(),
      primary key (upstream_id, tool));`,
+  // Token buckets shared by every replica (MCP requests per key, chat turns, failed logins); password lifecycle.
+  `create table rate_buckets (
+     key text primary key,
+     tokens double precision not null,
+     ok boolean not null default true,
+     at timestamptz not null default now());
+   alter table users add column must_change_password boolean not null default false;
+   create index audit_log_at on audit_log (at);
+   create index sessions_expires on sessions (expires_at);`,
+  // OAuth (oauth.ts): registered clients, one grant per consent, single-use codes, hashed access/refresh tokens.
+  `create table oauth_clients (
+    client_id text primary key,             -- 'dcr_…' or the https URL of a client metadata document
+    kind text not null check (kind in ('dcr', 'cimd')),
+    client_name text not null,
+    redirect_uris text[] not null,
+    client_uri text,
+    fetched_at timestamptz,                 -- CIMD: when the document was last fetched
+    expires_at timestamptz,                 -- CIMD: cache lifetime from the document's Cache-Control
+    created_at timestamptz not null default now());
+  create table oauth_grants (
+    id bigserial primary key,
+    user_id bigint not null references users(id) on delete cascade,
+    client_id text not null,
+    client_name text not null,
+    redirect_host text not null,
+    resource text not null,
+    scope text not null,
+    created_at timestamptz not null default now(),
+    last_used_at timestamptz,
+    revoked_at timestamptz);
+  create table oauth_codes (
+    hash text primary key,
+    client_id text not null,
+    user_id bigint not null references users(id) on delete cascade,
+    redirect_uri text not null,
+    code_challenge text not null,
+    resource text not null,
+    scope text not null,
+    expires_at timestamptz not null,
+    used_at timestamptz,
+    grant_id bigint references oauth_grants(id) on delete cascade);
+  create table oauth_tokens (
+    hash text primary key,
+    grant_id bigint not null references oauth_grants(id) on delete cascade,
+    kind text not null check (kind in ('access', 'refresh')),
+    expires_at timestamptz not null,
+    used_at timestamptz,
+    created_at timestamptz not null default now());
+  create index oauth_grants_user on oauth_grants (user_id);
+  create index oauth_tokens_grant on oauth_tokens (grant_id);`,
 ];
+
+// Provisioning (stores, hosted MCP servers): the gateway writes the desired state, the provisioner reconciles it
+// in Kubernetes and records progress here; managed upstreams are registered by the provisioner.
+MIGRATIONS.push(`
+  alter table upstreams add column managed_by text;   -- 'provision:<id>': created by the provisioner, URL fixed
+  create table provisions (
+    id bigserial primary key,
+    kind text not null check (kind in ('store', 'hosted')),
+    slug text not null unique,                       -- also the upstream slug: tools are <slug>__<tool>
+    name text not null,
+    owner_id bigint references users(id) on delete set null,
+    owner_email text not null,
+    spec jsonb not null default '{}',                -- hosted: image, port, path, env, egress
+    secret text,                                     -- hosted: sealed JSON of secret env vars
+    status text not null check (status in ('provisioning', 'ready', 'failed', 'deleting')),
+    step text,                                       -- what the provisioner is doing / last did
+    reason text,                                     -- why it failed
+    namespace text not null unique,
+    url text,                                        -- store: public storefront URL
+    timeout_s integer not null,
+    attempts integer not null default 0,
+    created_at timestamptz not null default now(),
+    started_at timestamptz not null default now(),   -- this attempt (retry resets it)
+    ready_at timestamptz,
+    updated_at timestamptz not null default now());
+  create index provisions_owner on provisions (owner_id);`);
+
+/** Take one token from a shared bucket (`burst` capacity, refilled at `perMin`). Returns 0 if allowed, else the
+ *  seconds to wait. One atomic upsert, so concurrent requests on several replicas can't overspend. */
+export async function rateTake(key: string, burst: number, perMin: number): Promise<number> {
+  const r = await one<{ tokens: number; ok: boolean }>(
+    `insert into rate_buckets as b (key, tokens, ok, at) values ($1, $2::float8 - 1, true, now())
+     on conflict (key) do update set
+       ok = least($2::float8, b.tokens + extract(epoch from now() - b.at) * $3::float8 / 60) >= 1,
+       tokens = least($2::float8, b.tokens + extract(epoch from now() - b.at) * $3::float8 / 60)
+                - case when least($2::float8, b.tokens + extract(epoch from now() - b.at) * $3::float8 / 60) >= 1 then 1 else 0 end,
+       at = now()
+     returning tokens, ok`, [key, burst, perMin]);
+  if (!r || r.ok) return 0;
+  return Math.max(1, Math.ceil(((1 - r.tokens) / perMin) * 60));
+}
+
+/** Seconds until a bucket has a token again, without taking one (0 = available). */
+export async function ratePeek(key: string, burst: number, perMin: number): Promise<number> {
+  const r = await one<{ t: number }>(`select least($2::float8, tokens + extract(epoch from now() - at) * $3::float8 / 60) as t
+                                       from rate_buckets where key = $1`, [key, burst, perMin]);
+  if (!r || r.t >= 1) return 0;
+  return Math.max(1, Math.ceil(((1 - r.t) / perMin) * 60));
+}
+
+/** Housekeeping, run by one replica at a time: expired sessions and buckets, and audit/status history past retention. */
+export async function maintenance(auditDays: number, eventDays: number) {
+  const c = await pool.connect();
+  try {
+    const { rows } = await c.query('select pg_try_advisory_lock(727275) as got');
+    if (!rows[0].got) return;
+    try {
+      await c.query('delete from sessions where expires_at < now()');
+      await c.query(`delete from rate_buckets where at < now() - interval '1 day'`);
+      if (auditDays > 0) await c.query(`delete from audit_log where at < now() - make_interval(days => $1)`, [auditDays]);
+      if (eventDays > 0) await c.query(`delete from upstream_events where at < now() - make_interval(days => $1)`, [eventDays]);
+      for (const sql of extraMaintenance) await c.query(sql);
+    } finally {
+      await c.query('select pg_advisory_unlock(727275)');
+    }
+  } finally {
+    c.release();
+  }
+}
+/** Other modules (OAuth, provisioning) add their own cleanup statements. */
+export const extraMaintenance: string[] = [];
+
+/** Clear a bucket (e.g. failed-login counter after a successful login). */
+export const rateReset = (key: string) => q('delete from rate_buckets where key = $1', [key]);
 
 export async function migrate() {
   const c = await pool.connect();

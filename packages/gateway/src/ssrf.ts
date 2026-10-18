@@ -36,8 +36,11 @@ const ssrfError = (msg: string) => Object.assign(new Error(`SSRF guard: ${msg}`)
 // `timeout` covers TCP + TLS. In-cluster (allow-listed) hosts get the short one (a SYN dropped during kube-proxy
 // rule changes must fail fast); internet hosts get `externalTimeout`, since a TLS handshake on a slow link can
 // take longer than 2 s and would make a healthy external server flap.
-export function createGuardedAgent({ allowHosts = [] as string[], timeout = 2000, externalTimeout = 5000, guard = true } = {}) {
-  const allow = new Set(allowHosts.map((h) => h.toLowerCase().replace(/\.$/, '')));
+export interface GuardOptions { allowHosts?: string[]; timeout?: number; externalTimeout?: number; guard?: boolean; allowFn?: (host: string) => boolean }
+export function createGuardedAgent({ allowHosts = [], timeout = 2000, externalTimeout = 5000, guard = true, allowFn = () => false }: GuardOptions = {}) {
+  const set = new Set(allowHosts.map((h) => h.toLowerCase().replace(/\.$/, '')));
+  // static allow-list (chart values) + dynamic (in-cluster hosts of servers the provisioner registered)
+  const allow = { has: (h: string) => set.has(h) || allowFn(h) };
   const checkedLookup = (hostname: string, opts: any, cb: any) => {
     dns.lookup(hostname, { ...opts, all: true }, (err, addrs: dns.LookupAddress[]) => {
       if (err) return cb(err);
