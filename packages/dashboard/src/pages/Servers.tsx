@@ -2,6 +2,7 @@ import { Fragment, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Server, type ServerEvent, type ServerStats, type Tool, type ToolAccess } from '../api';
 import { Badge, ErrorText, StatusBadge, Time, useAction, useIsAdmin } from '../ui';
+import { HostedServers } from './Hosted';
 
 const SERVERS = ['servers'];
 
@@ -53,6 +54,7 @@ export function Servers() {
           </tbody>
         </table>
       </div>
+      {admin && <HostedServers />}
     </>
   );
 }
@@ -75,7 +77,7 @@ function ServerRow({ server: s, admin, stats }: { server: Server; admin: boolean
           </button>
         </td>
         <td>
-          <div className="strong">{s.name}</div>
+          <div className="strong">{s.name} {s.managed && <Badge tone="blue" title="Registered by the provisioner (a store or hosted server)">managed</Badge>}</div>
           <div className="sub"><code>{s.slug}</code> · <span className="url">{s.url}</span></div>
         </td>
         <td><StatusBadge status={s.status} /></td>
@@ -104,12 +106,14 @@ function ServerRow({ server: s, admin, stats }: { server: Server; admin: boolean
                 onChange={() => patch.mutate({ enabled: !s.enabled })} />
               <span>{s.enabled ? 'On' : 'Off'}</span>
             </label>
-            <button className="btn btn-small" onClick={() => toggle('edit')}>Edit</button>
+            {!s.managed && <button className="btn btn-small" onClick={() => toggle('edit')}>Edit</button>}
             <button className="btn btn-small" onClick={() => toggle('history')}>History</button>
-            <button className="btn btn-small btn-danger" disabled={del.isPending}
-              onClick={() => { if (confirm(`Delete server "${s.name}"? Its tools disappear from the gateway.`)) del.mutate(); }}>
-              Delete
-            </button>
+            {!s.managed && (
+              <button className="btn btn-small btn-danger" disabled={del.isPending}
+                onClick={() => { if (confirm(`Delete server "${s.name}"? Its tools disappear from the gateway.`)) del.mutate(); }}>
+                Delete
+              </button>
+            )}
           </td>
         )}
       </tr>
@@ -137,8 +141,19 @@ function ToolList({ server, admin }: { server: Server; admin: boolean }) {
     api(`/api/servers/${server.id}/tools/${encodeURIComponent(tool)}/access`, { method: 'PUT', body: { access } }), [SERVERS]);
   const approve = useAction((tool: string) =>
     api(`/api/servers/${server.id}/tools/${encodeURIComponent(tool)}/approve`, { method: 'POST' }), [SERVERS]);
+  const approveAll = useAction(() => api(`/api/servers/${server.id}/approve-all`, { method: 'POST' }), [SERVERS]);
+  const pending = tools.filter((t) => t.changed).length;
   if (tools.length === 0) return <p className="muted">No tools (server not connected or exposes none).</p>;
   return (
+    <>
+    {admin && pending > 1 && (
+      <div className="form-actions">
+        <button className="btn btn-small" disabled={approveAll.isPending}
+          onClick={() => { if (confirm(`Approve all ${pending} pending tool changes of ${server.name}? Review the descriptions below first.`)) approveAll.mutate(undefined); }}>
+          Approve all {pending} changes</button>
+        <ErrorText error={approveAll.error} />
+      </div>
+    )}
     <table className="inner">
       <thead><tr><th>Gateway name</th><th>Description</th><th>Hints</th><th title="Restricted tools are hidden from tools/list and rejected if called">Access</th></tr></thead>
       <tbody>
@@ -149,16 +164,22 @@ function ToolList({ server, admin }: { server: Server; admin: boolean }) {
             <td className="desc">
               {t.changed && (
                 <div className="changed">
-                  <Badge tone="red" title="Hidden from clients and the chat until an admin approves the new definition">definition changed</Badge>
-                  <div className="sub">Approved: {t.approvedDescription ?? '—'}</div>
-                  <div className="sub">Now:</div>
+                  {t.change === 'new' ? (
+                    <Badge tone="red" title="Appeared after the server was approved: hidden from clients and the chat until an admin approves it">new tool</Badge>
+                  ) : (
+                    <>
+                      <Badge tone="red" title="Hidden from clients and the chat until an admin approves the new definition">definition changed</Badge>
+                      <div className="sub">Approved: {t.approvedDescription ?? '—'}</div>
+                      <div className="sub">Now:</div>
+                    </>
+                  )}
                 </div>
               )}
               {t.description ?? <span className="muted">—</span>}
               {t.changed && admin && (
                 <div><button className="btn btn-small" disabled={approve.isPending}
-                  onClick={() => { if (confirm(`Approve the new definition of ${t.gatewayName}? Clients will see it again.`)) approve.mutate(t.name); }}>
-                  Approve change</button></div>
+                  onClick={() => { if (confirm(`Approve ${t.change === 'new' ? 'the new tool' : 'the new definition of'} ${t.gatewayName}? Clients will see it.`)) approve.mutate(t.name); }}>
+                  {t.change === 'new' ? 'Approve tool' : 'Approve change'}</button></div>
               )}
             </td>
             <td className="chips">
@@ -181,6 +202,7 @@ function ToolList({ server, admin }: { server: Server; admin: boolean }) {
         ))}
       </tbody>
     </table>
+    </>
   );
 }
 
@@ -235,6 +257,7 @@ function ServerForm({ server, onDone }: { server?: Server; onDone: () => void })
     if (!editing) body.slug = slug;
     const t = Number(timeout);
     if (timeout.trim() && t > 0) body.timeoutMs = Math.round(t * 1000);
+    else if (editing && !timeout.trim() && server.timeoutMs) body.timeoutMs = null; // back to the gateway default
     const header = authHeader.trim() || 'Authorization';
     if (clearCredential) {
       body.credential = '';
