@@ -16,18 +16,30 @@ spec:
   template:
     metadata: { labels: { app: wordpress } }
     spec:
+      # www-data on an unprivileged port, read-only root filesystem: the code in the image can't be modified even by
+      # a compromised plugin; only uploads (PVC) and Apache/PHP scratch dirs (emptyDirs) are writable
+      securityContext: { runAsUser: 33, runAsGroup: 33, runAsNonRoot: true, fsGroup: 33, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: wordpress
           image: {{ .Values.images.wordpress }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
           env: {{- include "urumi.wpEnv" . | nindent 12 }}
-          ports: [ { containerPort: 80, name: http } ]
-          readinessProbe: { httpGet: { path: /wp-includes/images/blank.gif, port: http }, periodSeconds: 5 }
+          ports: [ { containerPort: 8080, name: http } ]
+          # readiness runs PHP + the database (a static file would pass with the DB down); liveness only Apache
+          readinessProbe: { httpGet: { path: /wp-login.php, port: http }, periodSeconds: 10, timeoutSeconds: 5 }
           livenessProbe: { tcpSocket: { port: http }, periodSeconds: 20, initialDelaySeconds: 30 }
           resources: {{- toYaml .Values.store.resources | nindent 12 }}
-          # Code comes from the image; only uploads persist.
-          volumeMounts: [ { name: uploads, mountPath: /var/www/html/wp-content/uploads } ]
-      volumes: [ { name: uploads, persistentVolumeClaim: { claimName: wordpress-uploads } } ]
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          volumeMounts:
+            - { name: uploads, mountPath: /usr/src/wordpress/wp-content/uploads }
+            - { name: run, mountPath: /var/run/apache2 }
+            - { name: lock, mountPath: /var/lock/apache2 }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: uploads, persistentVolumeClaim: { claimName: wordpress-uploads } }
+        - { name: run, emptyDir: { sizeLimit: 16Mi } }
+        - { name: lock, emptyDir: { sizeLimit: 16Mi } }
+        - { name: tmp, emptyDir: { sizeLimit: 256Mi } }
 ---
 apiVersion: v1
 kind: Service
@@ -41,8 +53,14 @@ kind: Ingress
 metadata:
   name: wordpress
   labels: {{- include "urumi.labels" . | nindent 4 }}
+  {{- if and .Values.tls.enabled .Values.tls.clusterIssuer }}
+  annotations: { cert-manager.io/cluster-issuer: {{ .Values.tls.clusterIssuer | quote }} }
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingressClassName }}
+  {{- if .Values.tls.enabled }}
+  tls: [ { hosts: [ {{ printf "%s.%s" .Values.store.host .Values.baseDomain | quote }} ], secretName: {{ include "urumi.tlsSecret" (dict "root" . "host" .Values.store.host) }} } ]
+  {{- end }}
   rules:
     - host: {{ .Values.store.host }}.{{ .Values.baseDomain }}
       http: { paths: [ { path: /, pathType: Prefix, backend: { service: { name: wordpress, port: { number: 80 } } } } ] }
@@ -65,7 +83,7 @@ spec:
     metadata: { labels: { app: store-bootstrap } }
     spec:
       restartPolicy: OnFailure
-      securityContext: { runAsUser: 33, runAsGroup: 33, runAsNonRoot: true }
+      securityContext: { runAsUser: 33, runAsGroup: 33, runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: bootstrap
           image: {{ .Values.images.wordpress }}
@@ -84,4 +102,9 @@ spec:
             - { name: MCP_WC_USER, value: {{ .Values.store.mcpUser | quote }} }
             - { name: MCP_WC_CK, valueFrom: { secretKeyRef: { name: store-app, key: wc-ck } } }
             - { name: MCP_WC_CS, valueFrom: { secretKeyRef: { name: store-app, key: wc-cs } } }
-          resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 512Mi } }
+            - { name: WP_CLI_CACHE_DIR, value: /tmp/wp-cli-cache }
+            - { name: HOME, value: /tmp }
+          resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          volumeMounts: [ { name: tmp, mountPath: /tmp } ]
+      volumes: [ { name: tmp, emptyDir: { sizeLimit: 64Mi } } ]

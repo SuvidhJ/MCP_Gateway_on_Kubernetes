@@ -40,3 +40,9 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
     define('WP_MEMORY_LIMIT', '256M');
     define('WP_ENVIRONMENT_TYPE', 'production');
 {{- end -}}
+
+{{/* TLS secret of an Ingress: one shared (pre-made, e.g. wildcard) secret, or one per host when cert-manager issues
+     them (two Certificates must not write the same secret). */}}
+{{- define "urumi.tlsSecret" -}}
+{{- if .root.Values.tls.clusterIssuer -}}{{ .root.Values.tls.secretName }}-{{ .host }}{{- else -}}{{ .root.Values.tls.secretName }}{{- end -}}
+{{- end -}}

@@ -17,6 +17,7 @@ spec:
           env:
             - { name: PORT, value: "8080" }
             - { name: WC_URL, value: "http://wordpress" }
+            - { name: MCP_TOKEN, valueFrom: { secretKeyRef: { name: store-app, key: mcp-token } } }
             - { name: STORE, value: {{ .Values.store.name | quote }} }
             - { name: STORE_CURRENCY, value: {{ .Values.store.currency | quote }} }
             - { name: STORE_TIMEZONE, value: {{ .Values.store.timezone | quote }} }
@@ -26,7 +27,7 @@ spec:
           ports: [ { containerPort: 8080, name: http } ]
           readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20 }
-          resources: { requests: { cpu: 20m, memory: 64Mi }, limits: { memory: 256Mi } }
+          resources: {{- toYaml .Values.wooMcp.resources | nindent 12 }}
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
 ---
 apiVersion: v1
