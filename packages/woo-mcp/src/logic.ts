@@ -1,4 +1,16 @@
 // Pure helpers for the WooCommerce MCP server: no I/O, so every rule here is unit-tested.
+import crypto from 'node:crypto';
+
+/** Constant-time check of `Authorization: Bearer <MCP_TOKEN>`. */
+export function authorized(header: string | undefined, expected: string) {
+  if (!expected) return true;
+  const m = /^Bearer\s+(\S+)$/i.exec(header ?? '');
+  if (!m) return false;
+  const a = crypto.createHash('sha256').update(m[1]).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 
 export class WcError extends Error {
   constructor(
@@ -140,7 +152,9 @@ const WC_MESSAGES: Record<string, (what: string, e: WcError) => string> = {
 /** Map any failure to an `isError` result the model can act on (a thrown handler would become a bare -32603). */
 export function mapError(e: unknown, what: string, store: string, timeoutMs: number): ToolResult {
   if (e instanceof WcError) {
-    const msg = WC_MESSAGES[e.code]?.(what, e) ?? `${e.code}: ${e.message}`;
+    // WordPress error pages put HTML in the message (wp_die: "<h1>Error establishing a database connection</h1>")
+    const plain = e.message.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const msg = WC_MESSAGES[e.code]?.(what, e) ?? `${e.code}: ${plain}`;
     return toolError(`${store}: ${msg} (HTTP ${e.status})`);
   }
   const err = e as { name?: string; message?: string; cause?: { code?: string } } | undefined;
