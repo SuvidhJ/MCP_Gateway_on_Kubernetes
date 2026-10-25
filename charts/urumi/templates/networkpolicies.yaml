@@ -1,26 +1,67 @@
 {{- if .Values.networkPolicy.enabled }}
-{{- $ingressFrom := dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" .Values.networkPolicy.ingressNamespace)) "podSelector" (dict "matchLabels" .Values.networkPolicy.ingressPodLabels) -}}
-# Ingress-only policies (verified in experiment E7: enforced ~1.3 s after apply, denials are ECONNREFUSED).
-# Nothing in the namespace accepts traffic unless a rule below allows it. Upstream MCP servers accept calls only from
-# the gateway, so the gateway's identity, authorization and audit cannot be bypassed from inside the cluster.
+{{- $np := .Values.networkPolicy -}}
+{{- $ingressFrom := dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $np.ingressNamespace)) "podSelector" (dict "matchLabels" $np.ingressPodLabels) -}}
+# Default deny in both directions (verified in experiment E7: enforced ~1.3 s after apply, denials are ECONNREFUSED).
+# Nothing in the namespace accepts or opens a connection unless a rule below allows it. Upstream MCP servers accept
+# calls only from the gateway, so the gateway's identity, authorization and audit cannot be bypassed from inside the
+# cluster; and a compromised pod (a WordPress plugin, an MCP server) cannot reach the internet or other services.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: default-deny-ingress
+  name: default-deny
   labels: {{- include "urumi.labels" . | nindent 4 }}
-spec: { podSelector: {}, policyTypes: [Ingress] }
+spec: { podSelector: {}, policyTypes: [Ingress, Egress] }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: gateway-from-ingress
+  name: dns-egress
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [ { namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ $np.dns.namespace }} } }, podSelector: { matchLabels: {{ toJson $np.dns.podLabels }} } } ]
+      ports: [ { port: 53, protocol: UDP }, { port: 53, protocol: TCP } ]
+---
+# ---- gateway: in from the ingress controller (and optional scrapers); out to its database, the in-cluster
+# upstreams, the Kubernetes API and public internet addresses
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
   labels: {{- include "urumi.labels" . | nindent 4 }}
 spec:
   podSelector: { matchLabels: { app: gateway } }
-  policyTypes: [Ingress]
+  policyTypes: [Ingress, Egress]
   ingress:
     - from: [ {{- toJson $ingressFrom }} ]
       ports: [ { port: 8080, protocol: TCP } ]
+    {{- if $np.metricsFromNamespaces }}
+    - from:
+        {{- range $np.metricsFromNamespaces }}
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ . }} } }
+        {{- end }}
+      ports: [ { port: 9091, protocol: TCP } ]
+    {{- end }}
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: postgres } } } ]
+      ports: [ { port: 5432, protocol: TCP } ]
+    - to: [ { podSelector: { matchExpressions: [ { key: app, operator: In, values: [woo-mcp, demo-upstream] } ] } } ]
+      ports: [ { port: 8080, protocol: TCP } ]
+    # MCP servers in provisioned namespaces (stores' woo-mcp, hosted servers: their port is the admin's choice)
+    - to: [ { namespaceSelector: { matchLabels: { urumi.ai/managed-by: urumi-provisioner, urumi.ai/release-namespace: {{ .Release.Namespace }} } }, podSelector: { matchLabels: { urumi.ai/role: mcp } } } ]
+    - to: [ { ipBlock: { cidr: {{ $np.apiServer.cidr }} } } ]
+      ports: [ {{- range $i, $p := $np.apiServer.ports }}{{ if $i }}, {{ end }}{ port: {{ $p }}, protocol: TCP }{{- end }} ]
+    {{- if $np.gatewayInternet }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, 0.0.0.0/8, 224.0.0.0/4, 240.0.0.0/4]
+    {{- end }}
+    {{- with $np.gatewayExtraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -34,6 +75,19 @@ spec:
     - from: [ { podSelector: { matchLabels: { app: gateway } } } ]
       ports: [ { port: 8080, protocol: TCP } ]
 ---
+# woo-mcp talks to the WooCommerce REST API in-cluster, nothing else
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: woo-mcp-egress
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app: woo-mcp } }
+  policyTypes: [Egress]
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: wordpress } } } ]
+      ports: [ { port: 8080, protocol: TCP } ]
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -43,23 +97,55 @@ spec:
   podSelector: { matchLabels: { app: postgres } }
   policyTypes: [Ingress]
   ingress:
-    - from: [ { podSelector: { matchLabels: { app: gateway } } } ]
+    - from: [ { podSelector: { matchExpressions: [ { key: app, operator: In, values: [gateway, provisioner] } ] } } ]
       ports: [ { port: 5432, protocol: TCP } ]
 ---
-# The storefront is public (via the ingress); woo-mcp reaches the WooCommerce REST API in-cluster.
+# The storefront is public (via the ingress); woo-mcp reaches the WooCommerce REST API in-cluster. WordPress itself
+# may only reach its database (no plugin phoning home, no SSRF out of a compromised plugin).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: wordpress-from-ingress-and-woo-mcp
+  name: wordpress
   labels: {{- include "urumi.labels" . | nindent 4 }}
 spec:
   podSelector: { matchLabels: { app: wordpress } }
-  policyTypes: [Ingress]
+  policyTypes: [Ingress, Egress]
   ingress:
     - from:
         - {{ toJson $ingressFrom }}
         - podSelector: { matchLabels: { app: woo-mcp } }
-      ports: [ { port: 80, protocol: TCP } ]
+      ports: [ { port: 8080, protocol: TCP } ]
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: mariadb } } } ]
+      ports: [ { port: 3306, protocol: TCP } ]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: store-bootstrap-egress
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app: store-bootstrap } }
+  policyTypes: [Egress]
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: mariadb } } } ]
+      ports: [ { port: 3306, protocol: TCP } ]
+{{- if and .Values.tls.enabled .Values.tls.clusterIssuer }}
+---
+# cert-manager's HTTP-01 solver pods run in this namespace while a certificate is issued: Let's Encrypt reaches them
+# through the ingress controller (default deny would make every issuance fail)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: acme-http01-solver
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { acme.cert-manager.io/http01-solver: "true" } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [ {{- toJson $ingressFrom }} ]
+      ports: [ { port: 8089, protocol: TCP } ]
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
