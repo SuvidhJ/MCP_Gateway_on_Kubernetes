@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Chat as ChatSession, useChat } from '@ai-sdk/react';
 import {
   DefaultChatTransport,
@@ -96,7 +96,7 @@ function ChatView({ model }: { model: string | null }) {
             <div className="msg-role">{m.role === 'user' ? 'You' : 'Assistant'}</div>
             <div className="msg-body">
               {m.parts.map((part, i) => {
-                if (part.type === 'text') return <div key={i} className="msg-text">{part.text}</div>;
+                if (part.type === 'text') return <div key={i} className="msg-text"><Markdown text={part.text} /></div>;
                 if (part.type === 'reasoning' && part.text) {
                   return <details key={i} className="reasoning"><summary>Reasoning</summary>{part.text}</details>;
                 }
@@ -190,6 +190,41 @@ function ToolCard({ part, onDecide }: { part: ToolUIPart | DynamicToolUIPart; on
       {part.state === 'output-denied' && <div className="muted small">You denied this call; it was not executed.</div>}
     </div>
   );
+}
+
+/** The little Markdown models write (paragraphs, bullet and numbered lists, headings, bold, inline code), rendered as React elements:
+ *  model text never becomes HTML. */
+function Markdown({ text }: { text: string }) {
+  const blocks: ReactNode[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
+  const flush = () => {
+    if (!list) return;
+    const items = list.items.map((t, i) => <li key={i}>{inline(t)}</li>);
+    blocks.push(list.ordered ? <ol key={blocks.length}>{items}</ol> : <ul key={blocks.length}>{items}</ul>);
+    list = null;
+  };
+  for (const line of text.split('\n')) {
+    const item = /^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$/.exec(line);
+    if (item) {
+      const ordered = !!item[2];
+      if (list && list.ordered !== ordered) flush();
+      (list ??= { ordered, items: [] }).items.push(item[3]);
+      continue;
+    }
+    flush();
+    if (!line.trim()) continue;
+    const h = /^#{1,6}\s+(.*)$/.exec(line);
+    blocks.push(<p key={blocks.length}>{h ? <strong>{inline(h[1])}</strong> : inline(line)}</p>);
+  }
+  flush();
+  return <>{blocks}</>;
+}
+
+function inline(s: string) {
+  return s.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((t, i) =>
+    t.startsWith('**') && t.endsWith('**') && t.length > 4 ? <strong key={i}>{t.slice(2, -2)}</strong>
+      : t.startsWith('`') && t.endsWith('`') && t.length > 2 ? <code key={i}>{t.slice(1, -1)}</code>
+      : t);
 }
 
 /** MCP tool results are `{content: [{type:'text', text}], ...}`; show the text when that is all there is. */

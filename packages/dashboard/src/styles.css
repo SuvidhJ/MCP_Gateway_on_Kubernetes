@@ -157,7 +157,11 @@ pre.json { background: #f4f6f9; color: var(--text); border: 1px solid var(--bord
 .msg { display: flex; gap: 12px; }
 .msg-role { width: 72px; flex-shrink: 0; font-size: 12px; font-weight: 600; color: var(--muted); padding-top: 6px; }
 .msg-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-.msg-text { white-space: pre-wrap; padding: 6px 0; }
+.msg-text { padding: 6px 0; overflow-wrap: anywhere; }
+.msg-text p { margin: 0 0 6px; }
+.msg-text ul, .msg-text ol { margin: 0 0 6px; padding-left: 22px; }
+.msg-text li { margin: 2px 0; }
+.msg-text code { font-family: var(--mono); font-size: 12.5px; background: var(--grey-bg); padding: 1px 4px; border-radius: 4px; }
 .msg-user .msg-text { background: #eef2fd; padding: 8px 12px; border-radius: 8px; align-self: flex-start; }
 .reasoning { color: var(--muted); font-size: 12.5px; white-space: pre-wrap; }
 .thinking { padding-left: 84px; }
@@ -184,3 +188,6 @@ pre.json { background: #f4f6f9; color: var(--text); border: 1px solid var(--bord
 .changed { margin-bottom: 6px; }
 .changed .sub { margin-top: 2px; }
 .err-text { color: #b42318; }
+.form.narrow { max-width: 460px; display: flex; flex-direction: column; gap: 12px; }
+.form.narrow label { display: flex; flex-direction: column; gap: 4px; }
+.ok-text { color: #15803d; }
