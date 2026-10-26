@@ -29,8 +29,8 @@ export function Members() {
       {created && (
         <div className="card secret-box">
           <div className="secret-head">
-            <strong>{created.member.email}</strong> was added as <strong>{created.member.role}</strong>.
-            Share this temporary password now; it is shown only once.
+            <strong>{created.member.email}</strong> ({created.member.role}): share this temporary password now; it is
+            shown only once and must be changed at first sign-in.
           </div>
           <div className="secret-line">
             <code className="secret">{created.password}</code>
@@ -49,7 +49,8 @@ export function Members() {
             </tr>
           </thead>
           <tbody>
-            {members.data?.map((m) => <MemberRow key={m.id} m={m} admin={admin} self={m.id === me.user.id} />)}
+            {members.data?.map((m) => <MemberRow key={m.id} m={m} admin={admin} self={m.id === me.user.id}
+              onReset={(r) => setCreated(r)} />)}
             {members.isPending && <tr><td colSpan={6} className="empty">Loading…</td></tr>}
           </tbody>
         </table>
@@ -58,9 +59,10 @@ export function Members() {
   );
 }
 
-function MemberRow({ m, admin, self }: { m: Member; admin: boolean; self: boolean }) {
+function MemberRow({ m, admin, self, onReset }: { m: Member; admin: boolean; self: boolean; onReset: (r: { member: Member; password: string }) => void }) {
   const patch = useAction((body: Partial<Member>) => api(`/api/members/${m.id}`, { method: 'PATCH', body }), [MEMBERS, ['keys']]);
   const del = useAction(() => api(`/api/members/${m.id}`, { method: 'DELETE' }), [MEMBERS, ['keys']]);
+  const reset = useAction(() => api<{ member: Member; password: string }>(`/api/members/${m.id}/reset-password`, { method: 'POST' }), [MEMBERS], onReset);
   const selfTitle = self ? 'You cannot change your own account here' : undefined;
   return (
     <>
@@ -90,6 +92,10 @@ function MemberRow({ m, admin, self }: { m: Member; admin: boolean; self: boolea
               }}>
               {m.disabled ? 'Enable' : 'Disable'}
             </button>
+            <button className="btn btn-small" disabled={self || reset.isPending} title={selfTitle ?? 'Issue a new temporary password and sign them out'}
+              onClick={() => { if (confirm(`Reset the password of ${m.email}? They are signed out and must use the new temporary password.`)) reset.mutate(undefined); }}>
+              Reset password
+            </button>
             <button className="btn btn-small btn-danger" disabled={self || del.isPending} title={selfTitle}
               onClick={() => { if (confirm(`Delete ${m.email}? This cannot be undone.`)) del.mutate(); }}>
               Delete
@@ -97,8 +103,8 @@ function MemberRow({ m, admin, self }: { m: Member; admin: boolean; self: boolea
           </td>
         )}
       </tr>
-      {(patch.error || del.error) && (
-        <tr><td colSpan={6}><ErrorText error={patch.error ?? del.error} /></td></tr>
+      {(patch.error || del.error || reset.error) && (
+        <tr><td colSpan={6}><ErrorText error={patch.error ?? del.error ?? reset.error} /></td></tr>
       )}
     </>
   );

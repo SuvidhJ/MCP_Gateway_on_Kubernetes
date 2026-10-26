@@ -7,3 +7,7 @@ overnight
 images/wordpress/downloads
 .git
 *.log
+out
+charts
+docs
+scripts

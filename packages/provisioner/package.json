@@ -1,0 +1,22 @@
+{
+  "name": "@urumi/provisioner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@urumi/shared": "0.1.0",
+    "pg": "8.23.1",
+    "undici": "8.11.2"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
+}

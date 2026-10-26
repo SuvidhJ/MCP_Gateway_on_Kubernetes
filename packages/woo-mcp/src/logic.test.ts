@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WcError, checkTransition, isoGmt, mapError, orderDetail, rewritePermalink } from './logic.js';
+import { WcError, authorized, checkTransition, isoGmt, mapError, orderDetail, rewritePermalink } from './logic.js';
 import { buildServer } from './server.js';
 
 describe('isoGmt', () => {
@@ -49,6 +49,10 @@ describe('mapError', () => {
     expect(r.isError).toBe(true);
     expect(r.content[0].text).toBe('store: order not found (HTTP 404)');
   });
+  it('strips the HTML of WordPress error pages', () => {
+    const r = mapError(new WcError(500, 'wp_die', '<h1>Error establishing a database connection</h1>'), 'orders', 'store', 8000);
+    expect(r.content[0].text).toBe('store: wp_die: Error establishing a database connection (HTTP 500)');
+  });
   it('reports timeouts and network errors as store unavailable', () => {
     const t = Object.assign(new Error('x'), { name: 'TimeoutError' });
     expect(mapError(t, 'x', 's', 8000).content[0].text).toBe('s: store unavailable (timed out after 8s)');
@@ -87,4 +91,13 @@ describe('isoLocal', () => {
     expect(isoLocal('2026-10-10T23:30:00', 'UTC')).toBe('2026-10-10T23:30:00+00:00');
     expect(isoLocal(null, 'UTC')).toBeNull();
   });
+});
+
+it('woo-mcp bearer check', () => {
+  expect(authorized('Bearer abc', 'abc')).toBe(true);
+  expect(authorized('bearer abc', 'abc')).toBe(true);
+  expect(authorized('Bearer abd', 'abc')).toBe(false);
+  expect(authorized('abc', 'abc')).toBe(false);
+  expect(authorized(undefined, 'abc')).toBe(false);
+  expect(authorized(undefined, '')).toBe(true); // no token configured (dev)
 });

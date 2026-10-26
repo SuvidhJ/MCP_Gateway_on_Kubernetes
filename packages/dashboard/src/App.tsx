@@ -8,13 +8,17 @@ import { Members } from './pages/Members';
 import { Keys } from './pages/Keys';
 import { Audit } from './pages/Audit';
 import { Chat, resetChat } from './pages/Chat';
+import { Account, ChangePassword } from './pages/Account';
+import { Stores } from './pages/Stores';
 
 const PAGES = [
   { id: 'servers', label: 'Servers', Component: Servers },
+  { id: 'stores', label: 'Stores', Component: Stores },
   { id: 'members', label: 'Members', Component: Members },
   { id: 'keys', label: 'API keys', Component: Keys },
   { id: 'audit', label: 'Audit log', Component: Audit },
   { id: 'chat', label: 'Chat', Component: Chat },
+  { id: 'account', label: 'Account', Component: Account },
 ] as const;
 
 function useHashRoute(): string {
@@ -75,6 +79,17 @@ export function App() {
 
   const page = PAGES.find((p) => p.id === route) ?? PAGES[0];
   const { user } = me.data;
+  // a temporary (invite/reset) password must be replaced before anything else; the API enforces the same
+  if (user.mustChangePassword) {
+    return (
+      <div className="login-wrap">
+        <div>
+          <ChangePassword forced onDone={() => qc.setQueryData(['me'], { ...me.data, user: { ...user, mustChangePassword: false } })} />
+          <div className="center-row"><button className="btn btn-small" onClick={() => void logout()}>Log out</button></div>
+        </div>
+      </div>
+    );
+  }
   return (
     <MeContext.Provider value={me.data}>
       <header className="topbar">

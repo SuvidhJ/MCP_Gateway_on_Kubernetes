@@ -1,0 +1,206 @@
+{{- if .Values.provisioning.enabled }}
+{{- $ns := .Release.Namespace -}}
+{{- $rel := .Release.Name -}}
+{{- $sa := printf "%s-provisioner" $rel -}}
+# The provisioner creates stores and hosted MCP servers, each in its own namespace. Least privilege:
+#   - cluster-wide it may only WRITE the few resource types a store needs (no reads of Secrets anywhere);
+#   - the ValidatingAdmissionPolicy below confines every write to namespaces named store-*/mcp-* that carry its
+#     label (so it can't touch kube-system, this release's namespace, or anyone else's);
+#   - it reads (pods, deployments, jobs, logs) only inside its own namespaces, through a RoleBinding it creates
+#     there to a ClusterRole it may `bind` (and nothing else).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $sa }}
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch, create, patch, delete]
+  - apiGroups: [""]
+    resources: [secrets, services, persistentvolumeclaims, resourcequotas, limitranges]
+    verbs: [create, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [create, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [create, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [create, patch, delete]
+  # may grant exactly these two roles (inside its namespaces: the admission policy enforces where)
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [{{ $rel }}-provisioner-ns-reader, {{ $rel }}-endpointslice-reader]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $sa }}
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+subjects: [ { kind: ServiceAccount, name: {{ $sa }}, namespace: {{ $ns }} } ]
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $sa }} }
+---
+# Bound (by the provisioner) only inside each store-*/mcp-* namespace: status of what it deployed there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $rel }}-provisioner-ns-reader
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events]
+    verbs: [get, list]
+  - apiGroups: [apps, batch]
+    resources: [deployments, replicasets, jobs]
+    verbs: [get, list]
+---
+# Bound (by the provisioner) for the gateway inside each managed namespace: its EndpointSlice watch.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $rel }}-endpointslice-reader
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+{{- if .Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy" }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $sa }}-scope
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: ["*/*"]   # every resource and subresource
+        scope: "*"
+  matchConditions:
+    - name: only-the-provisioner
+      expression: request.userInfo.username == "system:serviceaccount:{{ $ns }}:{{ $sa }}"
+  variables:
+    - name: ns
+      # the namespace being written: the Namespace object itself, or the one a namespaced object lives in
+      expression: >-
+        request.resource.group == "" && request.resource.resource == "namespaces"
+          ? (request.operation == "DELETE" ? oldObject : object)
+          : namespaceObject
+    - name: ours
+      expression: >-
+        variables.ns != null && has(variables.ns.metadata.labels)
+          && variables.ns.metadata.name.matches('^(store|mcp)-[a-z][a-z0-9-]{1,30}$')
+          && 'urumi.ai/managed-by' in variables.ns.metadata.labels
+          && variables.ns.metadata.labels['urumi.ai/managed-by'] == 'urumi-provisioner'
+          && 'urumi.ai/release-namespace' in variables.ns.metadata.labels
+          && variables.ns.metadata.labels['urumi.ai/release-namespace'] == '{{ $ns }}'
+  validations:
+    - expression: variables.ours
+      messageExpression: >-
+        'the Urumi provisioner may only write inside store-*/mcp-* namespaces it manages, not ' +
+        (variables.ns == null ? 'cluster-scoped ' + request.resource.resource : 'namespace ' + variables.ns.metadata.name)
+    # relabelling a foreign namespace into ours (to then take it over) is refused too
+    - expression: >-
+        !(request.resource.resource == "namespaces" && request.operation == "UPDATE")
+          || (has(oldObject.metadata.labels) && 'urumi.ai/managed-by' in oldObject.metadata.labels
+              && oldObject.metadata.labels['urumi.ai/managed-by'] == 'urumi-provisioner')
+      message: the provisioner cannot adopt an existing namespace
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $sa }}-scope
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $sa }}-scope
+  validationActions: [Deny]
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provisioner
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # one leader at a time anyway (Postgres advisory lock); Recreate avoids two during rollouts
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: provisioner } }
+  template:
+    metadata: { labels: { app: provisioner } }
+    spec:
+      serviceAccountName: {{ $sa }}
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: provisioner
+          image: {{ .Values.images.provisioner }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: DB_PASSWORD, valueFrom: { secretKeyRef: { name: gateway-db, key: password } } }
+            - { name: DATABASE_URL, value: "postgres://urumi:$(DB_PASSWORD)@postgres:5432/urumi" }
+            - { name: CREDENTIAL_KEY, valueFrom: { secretKeyRef: { name: gateway-app, key: credential-key } } }
+            - { name: RELEASE, value: {{ $rel | quote }} }
+            - { name: RELEASE_NAMESPACE, value: {{ $ns | quote }} }
+            - { name: GATEWAY_SA, value: gateway }
+            - { name: PROVISIONER_SA, value: {{ $sa | quote }} }
+            - { name: READER_CLUSTERROLE, value: "{{ $rel }}-provisioner-ns-reader" }
+            - { name: ENDPOINT_READER_CLUSTERROLE, value: "{{ $rel }}-endpointslice-reader" }
+            - { name: WORDPRESS_IMAGE, value: {{ .Values.images.wordpress | quote }} }
+            - { name: MARIADB_IMAGE, value: {{ .Values.images.mariadb | quote }} }
+            - { name: WOO_MCP_IMAGE, value: {{ .Values.images.wooMcp | quote }} }
+            - { name: PULL_POLICY, value: {{ .Values.images.pullPolicy | quote }} }
+            - { name: BASE_DOMAIN, value: {{ .Values.baseDomain | quote }} }
+            - { name: PUBLIC_PORT, value: {{ .Values.publicPort | quote }} }
+            - { name: INGRESS_CLASS, value: {{ .Values.ingressClassName | quote }} }
+            - { name: TLS_ENABLED, value: {{ ternary "1" "0" .Values.tls.enabled | quote }} }
+            - { name: TLS_CLUSTER_ISSUER, value: {{ .Values.tls.clusterIssuer | quote }} }
+            - { name: TLS_SECRET_PREFIX, value: {{ .Values.tls.secretName | quote }} }
+            - { name: INGRESS_NAMESPACE, value: {{ .Values.networkPolicy.ingressNamespace | quote }} }
+            - { name: INGRESS_POD_LABELS, value: {{ .Values.networkPolicy.ingressPodLabels | toJson | quote }} }
+            - { name: DNS_NAMESPACE, value: {{ .Values.networkPolicy.dns.namespace | quote }} }
+            - { name: DNS_POD_LABELS, value: {{ .Values.networkPolicy.dns.podLabels | toJson | quote }} }
+            - { name: STORE_TIMEZONE, value: {{ .Values.store.timezone | quote }} }
+            - { name: STORE_CURRENCY, value: {{ .Values.store.currency | quote }} }
+            - { name: STORE_COUNTRY, value: {{ .Values.store.country | quote }} }
+            - { name: STORE_DB_STORAGE, value: {{ .Values.provisioning.storeStorage.db | quote }} }
+            - { name: STORE_UPLOADS_STORAGE, value: {{ .Values.provisioning.storeStorage.uploads | quote }} }
+          ports: [ { containerPort: 8080, name: http } ]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 30, initialDelaySeconds: 30 }
+          resources: {{- toYaml .Values.provisioning.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+{{- if .Values.networkPolicy.enabled }}
+---
+# No ingress (default deny); out to Postgres and the Kubernetes API only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provisioner
+  labels: {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app: provisioner } }
+  policyTypes: [Egress]
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: postgres } } } ]
+      ports: [ { port: 5432, protocol: TCP } ]
+    - to: [ { ipBlock: { cidr: {{ .Values.networkPolicy.apiServer.cidr }} } } ]
+      ports: [ {{- range $i, $p := .Values.networkPolicy.apiServer.ports }}{{ if $i }}, {{ end }}{ port: {{ $p }}, protocol: TCP }{{- end }} ]
+{{- end }}
+{{- end }}

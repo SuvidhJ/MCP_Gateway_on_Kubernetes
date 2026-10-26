@@ -7,21 +7,33 @@ import { ProtocolError } from '@modelcontextprotocol/client';
 import { config } from './config.js';
 import { q } from './db.js';
 import { log } from './log.js';
-import { principalFromJwt, principalFromKey, type Principal } from './auth.js';
+import { principalFromJwt, principalFromKey, type Principal, type Rejected } from './auth.js';
 import { classify, errText, type Upstream, type UpstreamManager } from './upstreams.js';
 import { recordCall } from './metrics.js';
+import { rateTake } from './db.js';
 
 const errResult = (text: string) => ({ isError: true, content: [{ type: 'text' as const, text }] });
-const publicOrigin = new URL(config.publicUrl).origin;
 const publicHost = new URL(config.publicUrl).hostname.toLowerCase();
+const origins = new Set([new URL(config.publicUrl).origin, ...config.extraOrigins]);
+const extraHosts = new Set(config.extraOrigins.map((o) => new URL(o).hostname.toLowerCase()));
 
-async function audit(p: Principal, server: string | null, tool: string, ms: number, outcome: string, error: string | null, era: string, client: string | null) {
+/** Pluggable pieces owned by other modules (OAuth). Defaults: API keys only. */
+export interface McpHooks {
+  /** Builds the WWW-Authenticate value for a 401 on this request (resource_metadata when OAuth is on). */
+  challenge: (req: Request) => (error?: string, description?: string) => string;
+  principalFromOAuth: (token: string, req: Request) => Promise<Principal | Rejected | undefined>;
+}
+const bearer = (error?: string, description?: string) =>
+  `Bearer realm="urumi"${error ? `, error="${error}"` : ''}${description ? `, error_description="${description.replace(/"/g, "'")}"` : ''}`;
+export const defaultHooks: McpHooks = { challenge: () => bearer, principalFromOAuth: async () => undefined };
+
+async function audit(p: { userId: number; email: string; via: string }, server: string | null, tool: string, ms: number, outcome: string, error: string | null, era: string, client: string | null) {
   await q(`insert into audit_log(user_id, user_email, via, server, tool, duration_ms, outcome, error, era, client)
            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [p.userId, p.email, p.via, server, tool, ms, outcome, error, era, client])
     .catch((e) => log.error({ err: e.message }, 'audit insert failed'));
 }
 
-export function createGatewayMcp(mgr: UpstreamManager) {
+export function createGatewayMcp(mgr: UpstreamManager, hooks: McpHooks = defaultHooks) {
   /** Call-time authorization (stand-out S-2), checked on every list and every call: a restricted tool is hidden from
    *  tools/list and rejected if called by name. Identity is re-checked per HTTP request, so a revoked key fails on
    *  its very next call. */
@@ -35,24 +47,27 @@ export function createGatewayMcp(mgr: UpstreamManager) {
     const t0 = Date.now();
     const i = full.indexOf('__');
     const slug = i > 0 ? full.slice(0, i) : null;
-    const tool = i > 0 ? full.slice(i + 2) : full;
+    const exposedTool = i > 0 ? full.slice(i + 2) : full;
     const u = slug ? mgr.bySlug(slug) : undefined;
+    // the upstream's own name (client-facing names are sanitised); unknown while the server has never listed tools
+    const real = u ? mgr.realName(u, exposedTool) : undefined;
+    const tool = real ?? exposedTool;
     let outcome = 'ok';
     let error: string | null = null;
     let result: any;
-    if (!u || (u.client && !u.tools.some((t) => t.name === tool))) {
+    if (!u || !real) {
       outcome = 'unknown_tool';
       result = errResult(`Tool ${full} does not exist on this gateway.`);
     } else if (u.changed.has(tool)) {
       outcome = 'quarantined';
-      result = errResult(`${full} changed its definition since an admin approved it, so it is disabled until an admin reviews the change.`);
+      result = errResult(`${full} ${u.pins.has(tool) ? 'changed its definition since an admin approved it' : 'is new and not yet approved'}, so it is disabled until an admin reviews it.`);
     } else if (!allowed(p, u, tool)) {
       outcome = 'denied';
       result = errResult(mgr.accessOf(u, tool) === 'off' ? `${full} is turned off by an administrator.` : `${full} is restricted to admins; your role is "${p.role}".`);
     } else if (!u.enabled) {
       outcome = 'disabled';
       result = errResult(`Server "${u.name}" is disabled by an administrator; ${full} is unavailable.`);
-    } else if (u.status !== 'connected') {
+    } else if (u.status !== 'connected' && u.status !== 'connecting') {
       outcome = u.status === 'auth_failed' ? 'upstream_auth' : 'unreachable';
       result = errResult(`Server "${u.name}" is ${u.status === 'auth_failed' ? 'rejecting the gateway credential' : 'unreachable'}${u.lastError ? ` (${u.lastError})` : ''}. Other servers are unaffected.`);
     } else {
@@ -60,19 +75,30 @@ export function createGatewayMcp(mgr: UpstreamManager) {
         const r = await mgr.call(u, tool, args, signal);
         mgr.success(u);
         result = { content: r.content ?? [], ...(r.structuredContent ? { structuredContent: r.structuredContent } : {}), ...(r.isError ? { isError: true } : {}) };
-        if (r.isError) {
+        const size = Buffer.byteLength(JSON.stringify(result));
+        if (size > config.maxResultBytes) {
+          outcome = 'too_large';
+          result = errResult(`${full} returned ${Math.round(size / 1024)} KB, more than the gateway passes through (${Math.round(config.maxResultBytes / 1024)} KB). Ask for less (filters, smaller pages).`);
+        } else if (r.isError) {
           outcome = 'tool_error';
           error = String(r.content?.[0]?.text ?? '').slice(0, 300);
         }
       } catch (e: any) {
-        const cls = classify(e);
-        outcome = cls === 'hard' ? 'unreachable' : cls === 'soft' ? 'timeout' : cls === 'auth' ? 'upstream_auth' : 'error';
-        if (cls !== 'other') mgr.failure(u, e, 'call');
-        error = errText(e);
-        const secs = (u.timeoutMs ?? config.callTimeoutMs) / 1000;
-        result = errResult(cls === 'soft' ? `Server "${u.name}" did not answer within ${secs}s; the call was cancelled. Other servers are unaffected.`
-          : cls === 'hard' ? `Server "${u.name}" is unreachable (${error}). Other servers are unaffected.`
-          : `Server "${u.name}" failed: ${e instanceof ProtocolError ? 'protocol error: ' : ''}${error}`);
+        if (signal?.aborted) {
+          // the client gave up (closed the request / sent notifications/cancelled): not the upstream's fault
+          outcome = 'cancelled';
+          error = 'cancelled by the client';
+          result = errResult(`The call to ${full} was cancelled.`);
+        } else {
+          const cls = classify(e);
+          outcome = cls === 'hard' ? 'unreachable' : cls === 'soft' ? 'timeout' : cls === 'auth' ? 'upstream_auth' : 'error';
+          if (cls !== 'other') mgr.failure(u, e, 'call');
+          error = errText(e);
+          const secs = (u.timeoutMs ?? config.callTimeoutMs) / 1000;
+          result = errResult(cls === 'soft' ? `Server "${u.name}" did not answer within ${secs}s; the call was cancelled. Other servers are unaffected.`
+            : cls === 'hard' ? `Server "${u.name}" is unreachable (${error}). Other servers are unaffected.`
+            : `Server "${u.name}" failed: ${e instanceof ProtocolError ? 'protocol error: ' : ''}${error}`);
+        }
       }
     }
     recordCall(slug, outcome, Date.now() - t0);
@@ -120,7 +146,9 @@ export function createGatewayMcp(mgr: UpstreamManager) {
     const p = authInfo!.extra!.principal as Principal;
     const searchMode = requestInfo ? new URL(requestInfo.url).searchParams.get('tools') === 'search' : false;
     const s = new Server({ name: 'urumi-gateway', version: config.version }, {
-      capabilities: { tools: { listChanged: true } },
+      // 2025-era clients are served statelessly (no session, GET -> 405: any replica can answer), so they can't be
+      // pushed to; they see changes on their next tools/list. Modern clients get list_changed on their listen stream.
+      capabilities: { tools: { listChanged: era === 'modern' } },
       // tool lists are filtered per user, so never shared between callers
       cacheHints: { 'tools/list': { ttlMs: config.toolsTtlMs, cacheScope: 'private' } },
     } as any);
@@ -129,7 +157,13 @@ export function createGatewayMcp(mgr: UpstreamManager) {
       const client = ctx?.mcpReq?.envelope?.['io.modelcontextprotocol/clientInfo']?.name ?? requestInfo?.headers.get('user-agent')?.slice(0, 80) ?? null;
       const name: string = req.params.name;
       const args = req.params.arguments ?? {};
-      if (searchMode && name === 'gateway__search_tools') return search(p, String(args.query ?? ''), Number(args.limit ?? 5));
+      if (searchMode && name === 'gateway__search_tools') {
+        // answered by the gateway itself, but still a tool call: audited like every other one
+        const t0 = Date.now();
+        const r = search(p, String(args.query ?? ''), Number(args.limit ?? 5));
+        await audit(p, 'gateway', 'search_tools', Date.now() - t0, 'ok', null, era, client);
+        return r;
+      }
       if (searchMode && name === 'gateway__call_tool') return invoke(p, String(args.name ?? ''), args.arguments, ctx?.mcpReq?.signal, era, client);
       return invoke(p, name, args, ctx?.mcpReq?.signal, era, client);
     });
@@ -143,44 +177,58 @@ export function createGatewayMcp(mgr: UpstreamManager) {
     streams.delete(keyId);
   };
 
-  // Token buckets per caller (API key, or user for delegated chat tokens). In memory: per replica.
-  const buckets = new Map<string, { tokens: number; at: number }>();
-  const take = (id: string) => {
-    const now = Date.now();
-    const b = buckets.get(id) ?? { tokens: config.rateBurst, at: now };
-    b.tokens = Math.min(config.rateBurst, b.tokens + ((now - b.at) / 60_000) * config.ratePerMin);
-    b.at = now;
-    buckets.set(id, b);
-    if (b.tokens < 1) return Math.ceil(((1 - b.tokens) / config.ratePerMin) * 60);
-    b.tokens -= 1;
-    return 0;
-  };
-
   const json = (status: number, message: string, headers: Record<string, string> = {}) =>
     new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message }, id: null }), {
       status, headers: { 'content-type': 'application/json', ...headers },
     });
 
+  /** The JSON-RPC method (and tool name for tools/call) of a request we are about to reject, for the audit log. */
+  async function describe(req: Request) {
+    if (req.method !== 'POST') return { server: null as string | null, tool: `(${req.method})`, era: 'unknown' };
+    try {
+      const body = await req.clone().json() as any;
+      const msg = Array.isArray(body) ? body[0] : body;
+      const era = req.headers.get('mcp-protocol-version') ?? 'unknown';
+      if (msg?.method !== 'tools/call') return { server: null, tool: `(${String(msg?.method ?? 'unknown').slice(0, 60)})`, era };
+      const name = String(msg?.params?.name ?? '').slice(0, 200);
+      const i = name.indexOf('__');
+      return i > 0 ? { server: name.slice(0, i), tool: name.slice(i + 2), era } : { server: null, tool: name, era };
+    } catch {
+      return { server: null, tool: '(unparseable request)', era: 'unknown' };
+    }
+  }
+
   async function fetch(req: Request): Promise<Response> {
     // DNS-rebinding guards: Host must be ours; a browser Origin must be our own origin.
     const host = (req.headers.get('host') ?? '').toLowerCase().replace(/:\d+$/, '');
-    if (host !== publicHost && !config.allowedHosts.includes(host)) return json(403, `Forbidden: unexpected Host "${host}"`);
+    if (host !== publicHost && !extraHosts.has(host) && !config.allowedHosts.includes(host)) return json(403, `Forbidden: unexpected Host "${host}"`);
     const origin = req.headers.get('origin');
-    if (origin && origin !== publicOrigin) return json(403, `Forbidden: cross-origin request from ${origin}`);
+    if (origin && !origins.has(origin)) return json(403, `Forbidden: cross-origin request from ${origin}`);
 
+    const challenge = hooks.challenge(req);
     const m = /^Bearer\s+(\S+)$/i.exec(req.headers.get('authorization') ?? '');
-    if (!m) return json(401, 'Unauthorized: send "Authorization: Bearer <gateway API key>". Create a key in the dashboard.', { 'www-authenticate': 'Bearer realm="urumi"' });
-    const principal = m[1].startsWith('urumi_') ? await principalFromKey(m[1]) : await principalFromJwt(m[1]);
-    if (!principal) return json(401, 'Unauthorized: this API key is unknown, revoked, or its user is disabled.', { 'www-authenticate': 'Bearer realm="urumi", error="invalid_token"' });
+    if (!m) return json(401, 'Unauthorized: send "Authorization: Bearer <gateway API key>" (create one in the dashboard), or sign in with OAuth.', { 'www-authenticate': challenge() });
+    const token = m[1];
+    // uat_ = OAuth access token, urumi_ = API key, anything else = the chat's delegated JWT
+    const found = token.startsWith('uat_') ? await hooks.principalFromOAuth(token, req)
+      : token.startsWith('urumi_') ? await principalFromKey(token) : await principalFromJwt(token);
+    if (!found) return json(401, 'Unauthorized: this token is unknown or expired.', { 'www-authenticate': challenge('invalid_token', 'unknown or expired token') });
+    if ('rejected' in found) {
+      // a credential we know but refuse: the attempt still belongs in the audit log, under its owner
+      const d = await describe(req);
+      await audit(found, d.server, d.tool, 0, 'rejected', found.reason, d.era, req.headers.get('user-agent')?.slice(0, 80) ?? null);
+      return json(401, `Unauthorized: ${found.reason}.`, { 'www-authenticate': challenge('invalid_token', found.reason) });
+    }
+    const principal = found;
 
     if (req.method === 'POST') {
-      const wait = take(principal.keyId ? `key:${principal.keyId}` : `user:${principal.userId}`);
+      const wait = await rateTake(`mcp:${principal.bucket}`, config.rateBurst, config.ratePerMin);
       if (wait) return json(429, `Rate limit: ${config.ratePerMin} requests/minute per key (burst ${config.rateBurst}). Retry in ${wait}s.`, { 'retry-after': String(wait) });
     }
 
     const res = await handler.fetch(req, { authInfo: { token: 'redacted', clientId: principal.email, scopes: [], extra: { principal } } });
     if (!principal.keyId || !res.body || !(res.headers.get('content-type') ?? '').includes('text/event-stream')) return res;
-    // Wrap SSE bodies so a key revocation can end them.
+    // Wrap SSE bodies so a key revocation can end them (OAuth grants use negative ids in the same map).
     const keyId = principal.keyId;
     const reader = res.body.getReader();
     let close!: () => void;

@@ -4,6 +4,14 @@ publicPort: 8080
 tls: { enabled: false }
 images: { pullPolicy: IfNotPresent }   # local images are imported with `k3d image import` (tags are :dev, never pulled)
 gateway:
+  # OAuth clients (the MCP SDK, Claude Code) only allow plain-HTTP authorization servers on loopback, so locally the
+  # gateway also answers on http://localhost:8080 (its own issuer there). Production uses https only.
+  extraOrigins: [http://localhost:8080]
   llm:
     baseUrl: http://host.k3d.internal:11434/v1   # Ollama on the host GPU
     model: qwen3.5-agent
+networkPolicy:
+  # host.k3d.internal is a private address (the Docker host): let the gateway reach Ollama's port there
+  gatewayExtraEgress:
+    - to: [ { ipBlock: { cidr: 0.0.0.0/0 } } ]
+      ports: [ { port: 11434, protocol: TCP } ]

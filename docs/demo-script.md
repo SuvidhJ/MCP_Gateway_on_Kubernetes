@@ -1,4 +1,4 @@
-# Demo video script (~12–15 min)
+# Demo video script (~15 min core + ~5 min bonus/stand-outs)
 
 Covers every item in the brief's "Demo video requirements". Before recording: `bash scripts/up.sh`, then
 `bash scripts/demo-check.sh` once (it creates members alice and bob; re-run any time). Open four windows:
@@ -15,8 +15,9 @@ kubectl -n urumi get deploy,svc,ingress,pvc,secret,networkpolicy
 kubectl -n urumi get deploy gateway -o jsonpath='{.spec.template.spec.containers[0].resources}'; echo
 kubectl -n urumi describe deploy woo-mcp | grep -A2 -E 'Liveness|Readiness'
 ```
-- Public: only the two Ingress hosts (store, gateway). Internal-only: woo-mcp, demo-upstream, MariaDB, Postgres
-  (ClusterIP, no Ingress) **and** default-deny NetworkPolicies: upstreams accept only the gateway. Prove it:
+- Public: only the Ingress hosts (store, gateway, provisioned stores). Internal-only: woo-mcp, demo-upstream, MariaDB,
+  Postgres, provisioner (ClusterIP or no Service, no Ingress) **and** default-deny NetworkPolicies in both directions:
+  upstreams accept only the gateway, WordPress may only reach its database, woo-mcp only WordPress. Prove it:
 ```bash
 kubectl -n urumi run probe --rm -it --image=postgres:18.6-alpine --restart=Never -- \
   sh -c 'wget -qO- -T 3 http://woo-mcp/healthz || echo BLOCKED'      # -> BLOCKED (connection refused)
@@ -33,7 +34,8 @@ kubectl -n urumi run probe --rm -it --image=postgres:18.6-alpine --restart=Never
    `claude` → `/mcp` shows `urumi` with every enabled server's tools → ask "What orders came in today?" →
    then "Using DeepWiki, what does the 'on-hold' order status mean in woocommerce/woocommerce, and list the store's
    on-hold orders" (two upstream servers in one prompt).
-4. **Revoke** bob's key in the dashboard → his next Claude Code call fails with "this API key is unknown, revoked…".
+4. **Revoke** bob's key in the dashboard → his next Claude Code call fails with "Unauthorized: API key revoked";
+   the refused attempt is in the audit log under bob (`rejected`).
 5. **Disable** DeepWiki (Servers → toggle) → its tools vanish from Claude Code (`list_changed` push) and from the chat.
 6. **Kill a pod:** `kubectl -n urumi delete pod -l app=demo-upstream` → dashboard shows Demo upstream
    *Unreachable* within ~0.2 s, store tools keep working; it is *Connected* again ~3 s later (History panel).
@@ -68,3 +70,29 @@ kubectl -n urumi run probe --rm -it --image=postgres:18.6-alpine --restart=Never
 ## 7. Local → VPS (1 min)
 - `values-local.yaml` vs `values-prod.yaml`: domain, TLS, image registry, storage sizes, LLM provider + key.
 - `helm upgrade` with a new image tag; `helm history urumi`; `helm rollback urumi <rev>`; secrets survive (`keep`).
+
+## 8. Bonus: multi-store provisioning (3 min)
+1. *Stores → New store* "Shop B" (`pb`) and, at once, "Shop C" (`pc`): both *Provisioning* with the current step
+   ("waiting for the store bootstrap…"), *Ready* in about a minute, in parallel.
+2. `kubectl get ns -l urumi.ai/managed-by=urumi-provisioner` and `kubectl -n store-pb get all,pvc,secret,ingress,
+   resourcequota,limitrange,networkpolicy`: own namespace (Pod Security `restricted`), database, volumes, Secrets,
+   Ingress host `pb.127.0.0.1.nip.io`, quota, limits, default-deny policies.
+3. Servers page: `pb` registered automatically (tools `pb__list_orders`, … named after the store).
+4. Place an order on `http://pb.127.0.0.1.nip.io:8080/shop/`; chat: "Compare today's orders in the Urumi store and
+   Shop B" → it calls `store__list_orders` and `pb__list_orders`.
+5. Isolation: from pb's woo-mcp, `kubectl -n store-pb exec deploy/woo-mcp -- node -e "require('net').connect(3306,
+   'mariadb.store-pc.svc.cluster.local').on('error',e=>console.log(e.code))"` → `ECONNREFUSED`.
+6. Delete Shop C → *Deleting* → gone; `kubectl get ns store-pc` → NotFound; `pc__` tools gone from Claude Code.
+7. Guardrails/recovery (narrate, or show `scripts/provision-check.sh` output): 4th store per user refused, a 20 s
+   timeout fails with the step it waited for and Retry completes it, killing the provisioner mid-way resumes,
+   unpullable images fail fast with the reason. The provisioner's admission policy:
+   `kubectl --as=system:serviceaccount:urumi:urumi-provisioner -n kube-system create secret generic x` → denied.
+
+## 9. Stand-outs (2 min)
+- **OAuth:** `claude mcp add --transport http urumi-oauth http://localhost:8080/mcp` → `/mcp` → Authenticate →
+  browser login + consent ("Allow Claude Code?", identified by its metadata URL) → tools appear; *Account →
+  Connected apps* → Revoke → next call fails.
+- **Hosted MCP server:** *Servers → Deploy from image* `urumi/demo-upstream:dev`, port 8080 → *Ready* →
+  `<slug>__echo` works; show its namespace's NetworkPolicy and the pod running as uid 10001, read-only.
+- **Rug pull by addition:** `kubectl -n urumi set env deploy/demo-upstream EXTRA_TOOL=purge_cache` → Servers shows
+  *new tool*, hidden until approved.

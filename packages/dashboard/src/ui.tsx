@@ -38,6 +38,10 @@ const OUTCOME_TONE: Record<string, Tone> = {
   unreachable: 'red',
   timeout: 'red',
   upstream_auth: 'amber',
+  quarantined: 'red',
+  cancelled: 'grey',
+  too_large: 'amber',
+  rejected: 'red',
   error: 'red',
 };
 export const OutcomeBadge = ({ outcome }: { outcome: string }) => (

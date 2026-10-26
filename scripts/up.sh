@@ -22,20 +22,34 @@ fi
 if [ $BUILD = 1 ]; then
   step "images"
   bash scripts/fetch-store-assets.sh
-  docker build -t urumi/wordpress:dev images/wordpress
-  for pkg in woo-mcp demo-upstream gateway; do
-    docker build -f images/node/Dockerfile --build-arg PKG=$pkg -t urumi/$pkg:dev .
+  # --provenance=false: with Docker Desktop's containerd image store, the default attestation manifest makes
+  # `k3d image import` fail with "content digest ... not found" (while still printing "Successfully imported")
+  docker build --provenance=false -t urumi/wordpress:dev images/wordpress
+  for pkg in woo-mcp demo-upstream provisioner gateway; do
+    docker build --provenance=false -f images/node/Dockerfile --build-arg PKG=$pkg -t urumi/$pkg:dev .
   done
-  for img in mariadb:11.4.13 postgres:18.6-alpine; do docker image inspect $img >/dev/null 2>&1 || docker pull $img; done
-  "$K3D" image import -c "$CLUSTER" urumi/wordpress:dev urumi/woo-mcp:dev urumi/demo-upstream:dev urumi/gateway:dev mariadb:11.4.13 postgres:18.6-alpine
+  # only our own images are imported; k3s pulls the public ones (mariadb, postgres) itself. Importing a pulled
+  # multi-platform image from the containerd image store fails the whole batch (blobs of other platforms are absent).
+  "$K3D" image import -c "$CLUSTER" urumi/wordpress:dev urumi/woo-mcp:dev urumi/demo-upstream:dev urumi/provisioner:dev urumi/gateway:dev
+  # k3d reports success even when ctr rejects an image, so check the node really has each one
+  have=$(docker exec "k3d-$CLUSTER-server-0" crictl images)
+  for img in urumi/wordpress urumi/woo-mcp urumi/demo-upstream urumi/provisioner urumi/gateway; do
+    echo "$have" | grep -q "docker.io/$img " || { echo "image $img:dev missing in the cluster after import" >&2; exit 1; }
+  done
 fi
 
 step "helm upgrade --install urumi (values-local.yaml)"
-"$HELM" upgrade --install urumi charts/urumi -n "$NS" --create-namespace --kube-context "$CTX" -f charts/urumi/values-local.yaml
+"$HELM" upgrade --install urumi charts/urumi -n "$NS" --create-namespace --kube-context "$CTX" -f charts/urumi/values-local.yaml --timeout 10m
 # images keep their :dev tag across rebuilds, so restart to pick up a fresh import
-[ $BUILD = 1 ] && kubectl --context "$CTX" -n "$NS" rollout restart deploy/gateway deploy/woo-mcp deploy/demo-upstream >/dev/null
-for d in mariadb wordpress postgres woo-mcp demo-upstream gateway; do
+[ $BUILD = 1 ] && kubectl --context "$CTX" -n "$NS" rollout restart deploy/wordpress deploy/gateway deploy/woo-mcp deploy/demo-upstream deploy/provisioner >/dev/null
+for d in mariadb wordpress postgres woo-mcp demo-upstream provisioner gateway; do
   kubectl --context "$CTX" -n "$NS" rollout status deploy/$d --timeout=300s
+done
+
+# rollout status returns while old pods still finish requests (preStop + graceful shutdown): wait until they are gone,
+# so the next command never talks to the previous version
+for _ in $(seq 1 60); do
+  kubectl --context "$CTX" -n "$NS" get pods --no-headers 2>/dev/null | grep -q Terminating || break; sleep 1
 done
 
 step "ready"

@@ -10,6 +10,7 @@ images:
   wooMcp: urumi/woo-mcp:dev
   demoUpstream: urumi/demo-upstream:dev
   gateway: urumi/gateway:dev
+  provisioner: urumi/provisioner:dev
   pullPolicy: IfNotPresent
 
 store:
@@ -25,52 +26,100 @@ store:
   storageSize: 2Gi
   resources:
     requests: { cpu: 100m, memory: 256Mi }
-    limits: { memory: 768Mi }
+    limits: { cpu: "1", memory: 768Mi }
 
 mariadb:
   storageSize: 2Gi
   resources:
     requests: { cpu: 50m, memory: 256Mi }
-    limits: { memory: 512Mi }
+    limits: { cpu: "1", memory: 512Mi }
 
-# TLS on the Ingress (prod: a cert-manager or pre-made secret). Off locally.
+# TLS on both Ingresses (prod: a cert-manager or pre-made secret). Off locally.
 tls:
   enabled: false
   secretName: urumi-tls
+  # cert-manager: set an issuer name and the Ingresses get the annotation (the secret is then created for you)
+  clusterIssuer: ""
 
 postgres:
   storageSize: 1Gi
   resources:
     requests: { cpu: 50m, memory: 128Mi }
-    limits: { memory: 512Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+wooMcp:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+demoUpstream:
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits: { cpu: 250m, memory: 192Mi }
 
 gateway:
   host: gateway          # -> gateway.<baseDomain>; serves /mcp, /api and the dashboard
   # Replicas share Postgres; admin changes and key revocations propagate via LISTEN/NOTIFY, each replica keeps its
   # own upstream connections and health loops, and MCP traffic is per-request, so any replica can serve any call.
   replicas: 2
-  rateLimit: { perMinute: 120, burst: 40 }   # per API key, per replica (token bucket)
+  rateLimit: { perMinute: 120, burst: 40 }   # per API key / OAuth grant, shared by all replicas (Postgres buckets)
   adminEmail: admin@urumi.local
   callTimeoutMs: 30000   # default per-call upstream timeout (per-server override in the dashboard)
+  # More origins served by the same gateway (each an OAuth issuer/resource of its own). Locally http://localhost:8080
+  # lets OAuth clients that only allow plain HTTP on loopback sign in (see values-local.yaml).
+  extraOrigins: []
   # In-cluster hostnames the SSRF guard lets resolve to private addresses (everything else must be public).
   ssrfAllowHosts: [woo-mcp, demo-upstream]
-  # Registered on first start only (afterwards the dashboard/DB is the source of truth).
+  # Registered on first start only (afterwards the dashboard/DB is the source of truth). credentialEnv: the token the
+  # chart generates for that server (kept in sync from its Secret while the server keeps its seeded URL).
   seedServers:
-    - { slug: store, name: "Store (WooCommerce)", url: "http://woo-mcp/mcp" }
-    - { slug: demo, name: "Demo upstream", url: "http://demo-upstream/mcp", timeoutMs: 10000 }
+    - { slug: store, name: "Store (WooCommerce)", url: "http://woo-mcp/mcp", credentialEnv: WOO_MCP_TOKEN }
+    - { slug: demo, name: "Demo upstream", url: "http://demo-upstream/mcp", timeoutMs: 10000, credentialEnv: DEMO_MCP_TOKEN }
     - { slug: deepwiki, name: "DeepWiki", url: "https://mcp.deepwiki.com/mcp" }
   # Chat agent: any OpenAI-compatible endpoint. Local default: Ollama on the host (reachable from k3d pods).
   llm:
     baseUrl: http://host.k3d.internal:11434/v1
     model: qwen3.5-agent
+    # Set once with --set gateway.llm.apiKey=...: stored in the gateway-app Secret and kept across later upgrades
+    # that don't pass it again.
     apiKey: ""
     reasoningEffort: none  # sent as reasoning_effort; "" to omit (for providers that reject it)
+    # model may be a comma-separated fallback list; a model with no output within this long hands over to the next
+    firstChunkMs: 20000
+  auditRetentionDays: 90
   resources:
     requests: { cpu: 50m, memory: 128Mi }
-    limits: { memory: 512Mi }
+    limits: { cpu: "1", memory: 512Mi }
 
-# Ingress-only NetworkPolicies (default deny; upstream MCP servers reachable only from the gateway).
+# Bonus + stand-out: stores (any user, a few each) and hosted MCP servers (admins, by container image), each in its
+# own namespace, created by the provisioner (templates/provisioner.yaml).
+provisioning:
+  enabled: true
+  maxStoresPerUser: 3
+  maxStores: 10
+  maxHosted: 10
+  storeTimeoutS: 600     # a store not Ready by then fails with the step it was waiting for (Retry restarts the clock)
+  hostedTimeoutS: 300
+  hostedImagePrefixes: []   # e.g. [ghcr.io/my-org/] to restrict what admins can deploy; empty = any image
+  storeStorage: { db: 1Gi, uploads: 1Gi }
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+# Default-deny NetworkPolicies, both directions. Ingress: upstream MCP servers and databases accept only the pods
+# that need them. Egress: every pod may resolve DNS; beyond that only the paths listed in networkpolicies.yaml.
 networkPolicy:
   enabled: true
   ingressNamespace: kube-system           # where the ingress controller runs (k3s: Traefik in kube-system)
   ingressPodLabels: { app.kubernetes.io/name: traefik }
+  dns: { namespace: kube-system, podLabels: { k8s-app: kube-dns } }
+  # Kubernetes API (the gateway's EndpointSlice watch). After kube-proxy DNAT the destination is the API server
+  # itself (k3s/k3d: the node, port 6443), so allow that port; narrow `cidr` to the node/API address in production.
+  apiServer: { cidr: 0.0.0.0/0, ports: [443, 6443] }
+  # The gateway reaches internet MCP servers, the hosted LLM and OAuth client metadata (public addresses only;
+  # private ranges stay blocked here as well as by the SSRF guard).
+  gatewayInternet: true
+  # Extra gateway egress rules (NetworkPolicy `to`/`ports` entries), e.g. the local Ollama on the host.
+  gatewayExtraEgress: []
+  # Namespaces allowed to scrape the gateway's /metrics (port 9091), matched by name. Empty = nobody.
+  metricsFromNamespaces: []

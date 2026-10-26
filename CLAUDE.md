@@ -13,19 +13,14 @@ Graded on a working core (the Definition of Done in `project.md`) plus deep unde
 only** (student). Deadline told on 2026-10-09: "1.5 weeks", so about **2026-10-19/20** (exact date/time zone still
 unconfirmed: ask).
 
-## Where we are (2026-10-10)
-| Phase | Status | Output |
-|---|---|---|
-| 1 Understanding | done | `planning/01-understanding.md` (requirement IDs M-*, D-*, S-*, B-*) |
-| 2 Landscape | done | `planning/02-landscape-research.md` |
-| 3 Knowledge + deep dive | done | `planning/03-knowledge-base.md`, `planning/04-deep-dive-and-options.md` |
-| 4 Failures/successes | done | `planning/05-failures-and-successes.md` (G1–G20, never/always lists, experiments E1–E18) |
-| 5 Depth from primary sources | done | `planning/06-depth/` (start at `00-index.md`) |
-| 6 Experiments | done (E8 local-model run in 07 §9) | `planning/07-experiment-results.md` + `experiments/` (spike code) |
-| **7 Final decisions** | **next** | decide the 17 items in `planning/06-depth/00-index.md` §3 using 07's evidence |
-| 8 Build, test, deploy, video, write-up | after 7 | product code (not started) |
-
-**No product code exists yet.** `experiments/` is throwaway spike code: reuse ideas and snippets, don't ship it.
+## Where we are (2026-10-18)
+Built and verified end to end (overnight build 2026-10-11, then an audit + hardening pass 2026-10-18 — bug log and
+test results in `planning/09-audit-and-hardening.md`). Everything in `project.md` except **submission** (video,
+GitHub, form) and the **VPS deployment** is done: the DoD, all mandatory requirements, the bonus (multi-store
+provisioning) and every stand-out except VPS (OAuth, hosted servers, tool permissions, many tools, hardening,
+scaling, observability, upgrades). Product code: `packages/{shared,woo-mcp,demo-upstream,provisioner,gateway,dashboard}`,
+chart `charts/urumi`. Test suites: `scripts/{demo-check,attack-check,provision-check}.sh`, `scripts/oauth-check.mjs`,
+`scripts/ui-check.mjs`, `npm test`. `experiments/` is throwaway spike code.
 
 ## Reading order for a new session
 1. `project.md` (brief), then `planning/06-depth/00-index.md` (the end-to-end path, 25 settled constraints, 17 open
@@ -55,6 +50,13 @@ unconfirmed: ask).
   - REST dates have no offset (use `*_gmt` + `Z`);
   - no status transition rules, so our policy guards them;
   - `customer_note` is untrusted buyer text.
+- **Build/deploy (2026-10-18):** Docker Desktop's containerd image store + BuildKit provenance makes `k3d image import`
+  fail ("content digest not found") while printing success: build with `--provenance=false`, import only our own
+  images (k3s pulls public ones), verify with `crictl images`. `rollout status` returns while old pods still serve.
+- **Credentials are full header values:** a token from an env var must be sent as `Bearer <token>`.
+- **OAuth clients (SDK, Claude Code) accept plain-HTTP authorization servers only on loopback**, hence the
+  `http://localhost:8080` extra origin locally. Claude Code's CIMD: `https://claude.ai/oauth/claude-code-client-metadata`
+  (redirects `http://localhost/callback`, any port).
 - **k8s:**
   - Traefik doesn't cut SSE/long calls; Node `fetch` cuts after 300 s without bytes, so keep 15 s keep-alives;
   - NetworkPolicy enforces ~1.3 s after apply (kube-router REJECT → ECONNREFUSED);
@@ -64,9 +66,10 @@ unconfirmed: ask).
 ## Environment on the dev box (Windows 11)
 - Docker Desktop, kubectl 1.36, `~/bin/k3d.exe` 5.9.0, `~/bin/helm.exe` 4.3.0, Go, Python 3.14, gh (logged in).
 - Node default 22.16; use **`fnm exec --using=24.21.0 node`** (product runtime pin is Node 24).
-- k3d cluster **`urumi`** (k3s v1.36.5) is **stopped**. It holds namespaces `exp` (spike gateway, upstreams, woo-mcp,
-  NetworkPolicies) and `store` (WordPress + WooCommerce + MariaDB, bootstrapped). Restart with `k3d cluster start urumi`
-  (~20 s, data kept); delete with `k3d cluster delete urumi` before creating the product cluster.
+- The product runs in k3d cluster **`urumi-dev`** (k3s v1.36.5), namespace `urumi`: `bash scripts/up.sh` creates it if
+  missing, builds and imports images, and `helm upgrade --install`s the chart (`--no-build` to skip builds). Docker
+  Desktop is installed per-user (`%LOCALAPPDATA%\Programs\DockerDesktop`); start it first. The old spike cluster
+  `urumi` no longer exists.
 - Ollama 0.40.2 with models in `E:\ollama\models`; GPU RTX 4060 Laptop 8 GB (local LLM for dev/evals).
 - Claude Code CLI: the VS Code extension binary (`~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude.exe`).
 - Bash tool = Git Bash: use `MSYS_NO_PATHCONV=1` for container paths; Python on Windows writes CRLF unless

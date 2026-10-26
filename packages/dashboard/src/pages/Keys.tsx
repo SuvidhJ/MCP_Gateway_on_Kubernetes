@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api, type ApiKey, type Info } from '../api';
+import { api, type ApiKey, type Info, type Member } from '../api';
 import { Badge, CopyButton, ErrorText, Time, useAction, useIsAdmin } from '../ui';
 
 export const useInfo = () => useQuery({ queryKey: ['info'], queryFn: () => api<Info>('/api/info'), staleTime: 60_000 });
@@ -9,14 +9,16 @@ export function Keys() {
   const admin = useIsAdmin();
   const [all, setAll] = useState(false);
   const [name, setName] = useState('');
+  const [owner, setOwner] = useState(''); // admins: issue for another member ('' = me)
   const [created, setCreated] = useState<{ key: ApiKey; secret: string } | null>(null);
+  const members = useQuery({ queryKey: ['members'], queryFn: () => api<Member[]>('/api/members'), enabled: admin });
   const showAll = admin && all;
   const keys = useQuery({
     queryKey: ['keys', showAll],
     queryFn: () => api<ApiKey[]>(showAll ? '/api/keys?all=1' : '/api/keys'),
   });
   const create = useAction(
-    (n: string) => api<{ key: ApiKey; secret: string }>('/api/keys', { method: 'POST', body: { name: n } }),
+    (n: string) => api<{ key: ApiKey; secret: string }>('/api/keys', { method: 'POST', body: { name: n, ...(owner ? { userId: Number(owner) } : {}) } }),
     [['keys']],
     (r) => { setCreated(r); setName(''); },
   );
@@ -40,6 +42,15 @@ export function Keys() {
           New key name
           <input required value={name} placeholder="e.g. claude-code-laptop" onChange={(e) => setName(e.target.value)} />
         </label>
+        {admin && (
+          <label>
+            For
+            <select value={owner} onChange={(e) => setOwner(e.target.value)}>
+              <option value="">me</option>
+              {members.data?.filter((m) => !m.disabled).map((m) => <option key={m.id} value={m.id}>{m.email}</option>)}
+            </select>
+          </label>
+        )}
         <button className="btn btn-primary" disabled={create.isPending}>Create key</button>
         <ErrorText error={create.error} />
       </form>
@@ -106,7 +117,8 @@ function NewKey({ created, onClose }: { created: { key: ApiKey; secret: string }
   return (
     <div className="card secret-box">
       <div className="secret-head">
-        Key <strong>{created.key.name}</strong> created. Copy the secret now: it is shown <strong>only once</strong>.
+        Key <strong>{created.key.name}</strong> created for <strong>{created.key.userEmail}</strong>. Copy the secret now: it is
+        shown <strong>only once</strong>.
       </div>
       <div className="secret-line">
         <code className="secret">{secret}</code>
@@ -117,6 +129,8 @@ function NewKey({ created, onClose }: { created: { key: ApiKey; secret: string }
         <pre>{cli}</pre>
         <CopyButton text={cli} />
       </div>
+      <p className="muted small">Clients that support OAuth can also connect with just <code>{mcpUrl}</code> and a browser sign-in
+        (no key): they appear under Account → Connected apps.</p>
       <h4>JSON client config (<code>mcpServers</code>)</h4>
       <div className="snippet">
         <pre>{json}</pre>

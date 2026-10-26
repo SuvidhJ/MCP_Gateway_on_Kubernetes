@@ -1,7 +1,7 @@
 // Fetch helper and types for the gateway admin API (docs/api.md). Same origin, cookie session.
 
 export type Role = 'admin' | 'member';
-export interface User { id: string; email: string; name: string; role: Role }
+export interface User { id: string; email: string; name: string; role: Role; mustChangePassword?: boolean }
 export interface Me { user: User; csrf: string }
 export interface Info { mcpUrl: string; version: string; chat: { enabled: boolean; model: string | null } }
 
@@ -24,6 +24,8 @@ export interface Tool {
   access: ToolAccess;
   /** The upstream changed this tool's definition since it was approved: hidden from clients until re-approved. */
   changed?: boolean;
+  /** 'changed' = definition differs from the approved one; 'new' = appeared after the server was approved. */
+  change?: 'changed' | 'new';
   approvedDescription?: string | null;
 }
 export type ToolAccess = 'member' | 'admin' | 'off';
@@ -41,6 +43,8 @@ export interface Server {
   timeoutMs: number | null;
   hasCredential: boolean;
   authHeader: string | null;
+  /** Registered by the provisioner (a store or hosted server): URL and credential are not editable here. */
+  managed?: boolean;
   tools: Tool[];
 }
 /** Per-server activity in the last hour (from the audit log; members see their own calls only). */
@@ -62,10 +66,23 @@ export interface ApiKey {
 }
 
 export type Outcome =
-  | 'ok' | 'tool_error' | 'denied' | 'unknown_tool' | 'disabled' | 'unreachable' | 'timeout' | 'upstream_auth' | 'error';
+  | 'ok' | 'tool_error' | 'denied' | 'quarantined' | 'unknown_tool' | 'disabled' | 'unreachable' | 'timeout'
+  | 'upstream_auth' | 'cancelled' | 'too_large' | 'rejected' | 'error';
 export const OUTCOMES: Outcome[] = [
-  'ok', 'tool_error', 'denied', 'unknown_tool', 'disabled', 'unreachable', 'timeout', 'upstream_auth', 'error',
+  'ok', 'tool_error', 'denied', 'quarantined', 'unknown_tool', 'disabled', 'unreachable', 'timeout', 'upstream_auth',
+  'cancelled', 'too_large', 'rejected', 'error',
 ];
+export interface Provision {
+  id: number; kind: 'store' | 'hosted'; slug: string; name: string; ownerId: number | null; ownerEmail: string;
+  status: 'provisioning' | 'ready' | 'failed' | 'deleting'; step: string | null; reason: string | null; namespace: string;
+  url: string | null; timeoutS: number; attempts: number; createdAt: string; startedAt: string; readyAt: string | null;
+  upstreamId: number | null;
+  spec?: { image: string; port: number; path: string; egress: 'none' | 'internet'; env: Record<string, string>; secretEnvNames: string[] };
+}
+export interface OAuthGrant {
+  id: string; clientId: string; clientName: string; redirectHost: string; createdAt: string; lastUsedAt: string | null;
+  revokedAt: string | null; userEmail: string; verified: boolean;
+}
 export interface AuditItem {
   id: string | number;
   at: string;
