@@ -25,6 +25,17 @@ status_of() { api "$TMP/admin" "$ACSRF" GET /servers | py "import json,sys; prin
 waitfor() { local slug=$1 want=$2 secs=$3 s; s=$(date +%s%N); for _ in $(seq 1 $((secs*5))); do [ "$(status_of "$slug")" = "$want" ] && { echo $(( ($(date +%s%N)-s)/1000000 )); return; }; sleep 0.2; done; echo -1; }
 # chat <jar> <csrf> <json-body-file> <out-file>
 chat() { curl -s -N -m 240 -b "$1" -H "x-csrf-token: $2" -H 'content-type: application/json' -d @"$3" "$G/api/chat" >"$4"; }
+# checkout <product-id> -> order id: the storefront's own checkout path (WooCommerce Store API, as the block checkout
+# page calls it: cart session + nonce, add to cart, place the order with cash on delivery)
+checkout() {
+  local j="$TMP/shop.$1" n a
+  curl -s -c "$j" -b "$j" -D "$j.h" -o /dev/null "$STORE/?rest_route=/wc/store/v1/cart"
+  n=$(grep -i '^nonce:' "$j.h" | tr -d '\r' | awk '{print $2}')
+  curl -s -c "$j" -b "$j" -H "Nonce: $n" -H 'content-type: application/json' -d "{\"id\":$1,\"quantity\":1}" "$STORE/?rest_route=/wc/store/v1/cart/add-item" >/dev/null
+  a='{"first_name":"Demo","last_name":"Buyer","address_1":"1 MG Road","city":"Bengaluru","state":"KA","postcode":"560001","country":"IN","email":"buyer@example.com","phone":"9999999999"}'
+  curl -s -c "$j" -b "$j" -H "Nonce: $n" -H 'content-type: application/json' -d "{\"billing_address\":$a,\"shipping_address\":$a,\"payment_method\":\"cod\"}" \
+    "$STORE/?rest_route=/wc/store/v1/checkout" | py "import json,sys; d=json.load(sys.stdin); print(d.get('order_id','') if d.get('status') in ('processing','on-hold','pending') else '')"
+}
 chat_text() { py "import json,sys; print(''.join(json.loads(l[6:]).get('delta','') for l in open(sys.argv[1],encoding='utf-8') if l.startswith('data: {') and '\"text-delta\"' in l))" "$1"; }
 
 echo "== 0. setup: admin login, fresh members alice (user A) and bob (user B), one key each"
@@ -36,11 +47,17 @@ for who in alice bob; do
   [ -n "$id" ] && api "$TMP/admin" "$ACSRF" DELETE "/members/$id" >/dev/null
   pw=$(api "$TMP/admin" "$ACSRF" POST /members "{\"email\":\"$who@urumi.local\",\"name\":\"$who\",\"role\":\"member\"}" | jget 'd["password"]')
   csrf=$(login "$who@urumi.local" "$pw" "$TMP/$who")
+  # invite passwords are temporary: replace it first (everything else answers 403 until then)
+  api "$TMP/$who" "$csrf" POST /auth/password "{\"current\":\"$pw\",\"password\":\"$who-demo-$RANDOM-pass\"}" >/dev/null
   key=$(api "$TMP/$who" "$csrf" POST /keys "{\"name\":\"$who-laptop\"}" | jget 'd["secret"]')
   eval "${who^^}_CSRF=$csrf; ${who^^}_KEY=$key; ${who^^}_KEYID=\$(api \"$TMP/$who\" \"$csrf\" GET /keys | jget 'd[0][\"id\"]')"
 done
 [[ "$ALICE_KEY" == urumi_* && "$BOB_KEY" == urumi_* ]] && ok "members invited, logged in, keys issued" || bad "member setup"
 for s in deepwiki demo; do id=$(api "$TMP/admin" "$ACSRF" GET /servers | py "import json,sys; print(next(x['id'] for x in json.load(sys.stdin) if x['slug']=='$s'))"); api "$TMP/admin" "$ACSRF" PATCH "/servers/$id" '{"enabled":true}' >/dev/null; done
+# after an upgrade of woo-mcp its changed tool definitions wait for an admin's review (rug-pull defence): approve them
+ST0=$(api "$TMP/admin" "$ACSRF" GET /servers | py "import json,sys; print(next(x['id'] for x in json.load(sys.stdin) if x['slug']=='store'))")
+pend=$(api "$TMP/admin" "$ACSRF" POST "/servers/$ST0/approve-all" | jget "','.join(d['approved'])")
+[ -n "$pend" ] && echo "  info  approved store tool changes after an upgrade: $pend"
 
 echo "== 1. store: storefront up, an order placed on the store is visible to the admin side"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$STORE/shop/"); [ "$code" = 200 ] && ok "storefront /shop/ 200" || bad "storefront /shop/ $code"
@@ -57,17 +74,19 @@ import json
 ev=[json.loads(l[6:]) for l in open(r'$TMP/c1.txt',encoding='utf-8') if l.startswith('data: {')]
 inp=[e for e in ev if e['type']=='tool-input-available'][-1]; ap=[e for e in ev if e['type']=='tool-approval-request'][-1]
 m=json.load(open(r'$TMP/c1.json'))['messages']
-m.append({'id':'a1','role':'assistant','parts':[{'type':'step-start'},{'type':'dynamic-tool','toolName':inp['toolName'],'toolCallId':inp['toolCallId'],'state':'approval-responded','input':inp['input'],'approval':{'id':ap['approvalId'],'approved':True,'signature':ap.get('signature')}}]})
+# as useChat does: the call's provider metadata travels back (Gemini 3 rejects a replayed call without its thought signature)
+part={'type':'dynamic-tool','toolName':inp['toolName'],'toolCallId':inp['toolCallId'],'state':'approval-responded','input':inp['input'],'approval':{'id':ap['approvalId'],'approved':True,'signature':ap.get('signature')}}
+if inp.get('providerMetadata'): part['callProviderMetadata']=inp['providerMetadata']
+m.append({'id':'a1','role':'assistant','parts':[{'type':'step-start'},part]})
 json.dump({'messages':m}, open(r'$TMP/c2.json','w'))"
     chat "$TMP/alice" "$ALICE_CSRF" "$TMP/c2.json" "$TMP/c2.txt"
     url=$(grep -o '\\"permalink\\":\\"[^\\]*' "$TMP/c2.txt" | head -1 | sed 's/.*:\\"//')
     [ -n "$url" ] && code=$(curl -s -o /dev/null -w '%{http_code}' "$url") || code=none
     [ "$code" = 200 ] && ok "product created by chat is live on the storefront ($url)" || bad "created product not on storefront (url=$url code=$code): $(chat_text "$TMP/c2.txt" | head -c 200)"
-    # place an order for it on the store (stands in for the manual checkout; same WooCommerce order path)
+    # order it on the storefront through the shop's own checkout (Store API: cart + cash-on-delivery checkout)
     pid=$(grep -o '\\"id\\":[0-9]*' "$TMP/c2.txt" | head -1 | grep -o '[0-9]*$')
-    oid=$($K exec deploy/wordpress -- wp --allow-root wc shop_order create --user=1 --status=processing --payment_method=cod \
-      --line_items="[{\"product_id\":$pid,\"quantity\":1}]" --porcelain 2>/dev/null | tr -d '\r')
-    [ -n "$oid" ] && ok "order #$oid placed for product $pid" || bad "could not place an order for product $pid"
+    oid=$(checkout "$pid")
+    [ -n "$oid" ] && ok "order #$oid placed for product $pid through the storefront checkout (COD)" || bad "could not check out product $pid"
   else
     bad "no approval request from the agent: $(chat_text "$TMP/c1.txt" | head -c 200)"
   fi
@@ -97,7 +116,13 @@ $NODE scripts/mcp-call.mjs "$GS/mcp?tools=search" gateway__call_tool '{"name":"s
 echo "== 4. revoke bob's key -> next call rejected"
 api "$TMP/bob" "$BOB_CSRF" DELETE "/keys/$BOB_KEYID" >/dev/null
 expect 3 "bob's next call is rejected" "$BOB_KEY" --list
+expect 3 "bob's next tool call is rejected too" "$BOB_KEY" store__list_orders '{}'
 expect 0 "alice unaffected" "$ALICE_KEY" --list
+# a raw tools/call with the revoked key (a client normally fails at its first request, server/discover)
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BOB_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"store__list_orders","arguments":{}}}' "$G/mcp")
+rej=$(api "$TMP/admin" "$ACSRF" GET '/audit?outcome=rejected&user=bob@urumi.local' | jget "sum(1 for i in d['items'] if i['error']=='API key revoked' and i['via']=='key:bob-laptop' and (i['tool']=='(server/discover)' or (i['server']=='store' and i['tool']=='list_orders')))")
+[ "$code" = 401 ] && [ "$rej" -ge 2 ] && ok "rejected calls are in the audit log, attributed to bob ($rej rows, raw call HTTP $code)" || bad "rejected calls not audited (rows $rej, raw call HTTP $code)"
 
 echo "== 5. disable deepwiki -> its tools disappear for clients and the chat agent (same /mcp list)"
 DW=$(api "$TMP/admin" "$ACSRF" GET /servers | py "import json,sys; print(next(x['id'] for x in json.load(sys.stdin) if x['slug']=='deepwiki'))")
