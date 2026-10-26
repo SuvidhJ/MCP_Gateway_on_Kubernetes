@@ -5,19 +5,30 @@ baseDomain: example.com          # store.example.com, gateway.example.com (DNS A
 publicPort: 443
 tls:
   enabled: true
-  secretName: urumi-tls          # e.g. issued by cert-manager, or `kubectl create secret tls urumi-tls ...`
+  secretName: urumi-tls          # issued by cert-manager (clusterIssuer below), or `kubectl create secret tls urumi-tls ...`
+  clusterIssuer: ""              # e.g. letsencrypt-prod (install cert-manager + a ClusterIssuer first)
 images:
   wordpress: ghcr.io/suvidhj/urumi-wordpress:0.1.0
   wooMcp: ghcr.io/suvidhj/urumi-woo-mcp:0.1.0
   demoUpstream: ghcr.io/suvidhj/urumi-demo-upstream:0.1.0
   gateway: ghcr.io/suvidhj/urumi-gateway:0.1.0
+  provisioner: ghcr.io/suvidhj/urumi-provisioner:0.1.0
   pullPolicy: IfNotPresent
 store: { storageSize: 5Gi }
 mariadb: { storageSize: 5Gi }
 postgres: { storageSize: 5Gi }
 gateway:
   llm:
-    # Any OpenAI-compatible endpoint; a hosted free tier (key via --set gateway.llm.apiKey=...).
-    baseUrl: https://api.groq.com/openai/v1
-    model: openai/gpt-oss-20b
-    reasoningEffort: low
+    # Any OpenAI-compatible endpoint; here Google's Gemini API free tier (key from Google AI Studio, set once with
+    # --set gateway.llm.apiKey=...; scripts/vps-up.sh reads it from LLM_API_KEY). Gemini 3 can't turn thinking off
+    # ("none" is 2.5-only), so "minimal". Groq works too: https://api.groq.com/openai/v1 + openai/gpt-oss-20b.
+    # Models are tried in order per step: the free tier often answers 503 "high demand" or hangs (measured
+    # 2026-10-26: gemini-3.8-flash hung >90 s; 2.5 models are closed to new keys; 3.1-flash-lite answers in 3-6 s
+    # but sometimes stalls, the 3.5 lite models take ~20 s), so a 40 s first-output deadline per model.
+    baseUrl: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-flash-lite-latest
+    reasoningEffort: minimal
+    firstChunkMs: 40000
+networkPolicy:
+  # k3s: the API server listens on the node (6443). Narrow to the node's address, e.g. { cidr: 203.0.113.10/32, ports: [6443] }
+  apiServer: { cidr: 0.0.0.0/0, ports: [443, 6443] }

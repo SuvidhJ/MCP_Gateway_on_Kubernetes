@@ -12,7 +12,10 @@ stringData:
   key-pepper: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "key-pepper" "gen" (randAlphaNum 48)) | quote }}
   jwt-secret: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "jwt-secret" "gen" (randAlphaNum 48)) | quote }}
   credential-key: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "credential-key" "gen" (randAlphaNum 48)) | quote }}
-  llm-api-key: {{ .Values.gateway.llm.apiKey | default "none" | quote }}
+  # a value passed with --set wins; otherwise keep what the Secret already holds (an upgrade without --set must not
+  # wipe the key), else "none"
+  llm-api-key: {{ .Values.gateway.llm.apiKey | default (include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "llm-api-key" "gen" "none")) | quote }}
+  demo-token: {{ include "urumi.secretValue" (dict "ns" $ns "name" "gateway-app" "key" "demo-token" "gen" (randAlphaNum 40)) | quote }}
 ---
 # Read-only, namespace-scoped: the gateway watches EndpointSlices to see an in-cluster upstream die in ~0.2 s.
 apiVersion: v1
@@ -68,7 +71,19 @@ spec:
             - { name: KEY_PEPPER, valueFrom: { secretKeyRef: { name: gateway-app, key: key-pepper } } }
             - { name: JWT_SECRET, valueFrom: { secretKeyRef: { name: gateway-app, key: jwt-secret } } }
             - { name: CREDENTIAL_KEY, valueFrom: { secretKeyRef: { name: gateway-app, key: credential-key } } }
-            - { name: ALLOWED_HOSTS, value: "gateway,gateway.{{ $ns }},gateway.{{ $ns }}.svc,gateway.{{ $ns }}.svc.cluster.local,127.0.0.1,localhost" }
+            - { name: WOO_MCP_TOKEN, valueFrom: { secretKeyRef: { name: store-app, key: mcp-token } } }
+            - { name: DEMO_MCP_TOKEN, valueFrom: { secretKeyRef: { name: gateway-app, key: demo-token } } }
+            - { name: EXTRA_ORIGINS, value: {{ join "," .Values.gateway.extraOrigins | quote }} }
+            - { name: AUDIT_RETENTION_DAYS, value: {{ .Values.gateway.auditRetentionDays | quote }} }
+            - { name: PROVISIONING, value: {{ ternary "1" "0" .Values.provisioning.enabled | quote }} }
+            - { name: STORE_URL_PATTERN, value: {{ printf "%s://{slug}.%s%s" (ternary "https" "http" .Values.tls.enabled) .Values.baseDomain (ternary "" (printf ":%v" .Values.publicPort) (has (int .Values.publicPort) (list 80 443))) | quote }} }
+            - { name: MAX_STORES_PER_USER, value: {{ .Values.provisioning.maxStoresPerUser | quote }} }
+            - { name: MAX_STORES, value: {{ .Values.provisioning.maxStores | quote }} }
+            - { name: MAX_HOSTED, value: {{ .Values.provisioning.maxHosted | quote }} }
+            - { name: STORE_TIMEOUT_S, value: {{ .Values.provisioning.storeTimeoutS | quote }} }
+            - { name: HOSTED_TIMEOUT_S, value: {{ .Values.provisioning.hostedTimeoutS | quote }} }
+            - { name: HOSTED_IMAGE_PREFIXES, value: {{ join "," .Values.provisioning.hostedImagePrefixes | quote }} }
+            - { name: ALLOWED_HOSTS, value: "gateway,gateway.{{ $ns }},gateway.{{ $ns }}.svc,gateway.{{ $ns }}.svc.cluster.local,127.0.0.1" }
             - { name: SSRF_ALLOW_HOSTS, value: {{ join "," .Values.gateway.ssrfAllowHosts | quote }} }
             - { name: K8S_WATCH_NAMESPACE, value: {{ $ns | quote }} }
             - { name: SEED_SERVERS, value: {{ .Values.gateway.seedServers | toJson | quote }} }
@@ -78,12 +93,13 @@ spec:
             - { name: LLM_BASE_URL, value: {{ .Values.gateway.llm.baseUrl | quote }} }
             - { name: LLM_MODEL, value: {{ .Values.gateway.llm.model | quote }} }
             - { name: LLM_REASONING_EFFORT, value: {{ .Values.gateway.llm.reasoningEffort | quote }} }
+            - { name: LLM_FIRST_CHUNK_MS, value: {{ .Values.gateway.llm.firstChunkMs | quote }} }
             - { name: LLM_API_KEY, valueFrom: { secretKeyRef: { name: gateway-app, key: llm-api-key } } }
             - { name: STORE_TIMEZONE, value: {{ .Values.store.timezone | quote }} }
           ports: [ { containerPort: 8080, name: http }, { containerPort: 9091, name: metrics } ]
           # let the ingress/Service stop routing here before SIGTERM (no dropped requests on rollouts)
           lifecycle: { preStop: { sleep: { seconds: 3 } } }
-          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20, initialDelaySeconds: 60 }
           resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
@@ -100,11 +116,18 @@ kind: Ingress
 metadata:
   name: gateway
   labels: {{- include "urumi.labels" . | nindent 4 }}
+  {{- if and .Values.tls.enabled .Values.tls.clusterIssuer }}
+  annotations: { cert-manager.io/cluster-issuer: {{ .Values.tls.clusterIssuer | quote }} }
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingressClassName }}
   {{- if .Values.tls.enabled }}
-  tls: [ { hosts: [ {{ printf "%s.%s" .Values.gateway.host .Values.baseDomain | quote }} ], secretName: {{ .Values.tls.secretName }} } ]
+  tls: [ { hosts: [ {{ printf "%s.%s" .Values.gateway.host .Values.baseDomain | quote }} ], secretName: {{ include "urumi.tlsSecret" (dict "root" . "host" .Values.gateway.host) }} } ]
   {{- end }}
   rules:
     - host: {{ .Values.gateway.host }}.{{ .Values.baseDomain }}
       http: { paths: [ { path: /, pathType: Prefix, backend: { service: { name: gateway, port: { number: 80 } } } } ] }
+    {{- range .Values.gateway.extraOrigins }}
+    - host: {{ (urlParse .).hostname }}
+      http: { paths: [ { path: /, pathType: Prefix, backend: { service: { name: gateway, port: { number: 80 } } } } ] }
+    {{- end }}
