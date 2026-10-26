@@ -17,21 +17,58 @@ export type Status = 'connecting' | 'connected' | 'unreachable' | 'auth_failed' 
 /** Who may see and call a tool: everyone ('member'), admins only, or nobody ('off'). */
 export type Access = 'member' | 'admin' | 'off';
 type ToolDef = Awaited<ReturnType<Client['listTools']>>['tools'][number];
-export interface UpstreamRow { id: number; slug: string; name: string; url: string; auth_header: string | null; credential: string | null; enabled: boolean; timeout_ms: number | null }
+export interface UpstreamRow { id: number; slug: string; name: string; url: string; auth_header: string | null; credential: string | null; enabled: boolean; timeout_ms: number | null; managed_by?: string | null }
+export const UPSTREAM_COLS = 'id::int as id, slug, name, url, auth_header, credential, enabled, timeout_ms, managed_by';
 
 export interface Upstream {
   id: number; slug: string; name: string; url: string; authHeader: string | null; credential: string | null;
   enabled: boolean; timeoutMs: number | null;
+  /** 'provision:<id>' when the provisioner registered it (store / hosted server): URL and credential are its own. */
+  managedBy: string | null;
   status: Status; era: 'modern' | 'legacy' | null; protocolVersion: string | null; lastError: string | null;
   statusSince: Date; tools: ToolDef[]; access: Map<string, Access>;
-  /** Pinned definitions (rug-pull defence) and the tools whose current definition differs from the pin. */
+  /** Pinned definitions (rug-pull defence) and the tools whose current definition differs from the pin (or that
+   *  appeared after the server's tools were first approved). */
   pins: Map<string, { hash: string; description: string | null }>; changed: Set<string>;
+  /** Client-facing tool name (`slug__<safe name>`) <-> the upstream's own name. */
+  exposed: Map<string, string>; exposedOf: Map<string, string>;
+  /** Set when the stored credential can't be decrypted (CREDENTIAL_KEY changed): never connect with a wrong value. */
+  credentialError?: string;
   client?: Client; sessionId?: string; strikes: number; retryMs: number; timer?: NodeJS.Timeout;
   busy: boolean; again: boolean; removed: boolean;
+  /** Bumped whenever the connection is dropped, so a connect started for an old URL/credential can't install itself. */
+  gen: number; connecting?: { gen: number; p: Promise<void> };
 }
 
-const dispatcher = createGuardedAgent({ allowHosts: config.ssrfAllowHosts, timeout: config.connectTimeoutMs, externalTimeout: config.externalConnectTimeoutMs, guard: config.ssrfGuard });
-const baseFetch = ((url: any, init: any) => undiciFetch(url, { ...init, dispatcher })) as unknown as typeof fetch;
+/** In-cluster hostnames of provisioner-registered servers: allowed to resolve to private addresses (their URLs come
+ *  from the provisioner, never from user input). */
+const managedHosts = new Set<string>();
+const dispatcher = createGuardedAgent({ allowHosts: config.ssrfAllowHosts, timeout: config.connectTimeoutMs, externalTimeout: config.externalConnectTimeoutMs, guard: config.ssrfGuard, allowFn: (h) => managedHosts.has(h) });
+// redirect: 'error': MCP over HTTP never needs a redirect, and following one would let a registered server bounce the
+// gateway's requests (with their JSON-RPC bodies) to an allow-listed in-cluster host such as woo-mcp.
+export const baseFetch = ((url: any, init: any) => undiciFetch(url, { ...init, dispatcher, redirect: 'error' })) as unknown as typeof fetch;
+
+/** Tool names clients accept: [A-Za-z0-9_-], at most 64 characters (upstream names may use '.', '/', spaces…). */
+export function safeToolName(name: string, taken: Set<string>) {
+  let base = name.replace(/[^A-Za-z0-9_-]/g, '_') || 'tool';
+  if (base.length > 64) base = `${base.slice(0, 55)}_${crypto.createHash('sha256').update(name).digest('hex').slice(0, 8)}`;
+  let out = base;
+  for (let i = 2; taken.has(out); i++) out = `${base.slice(0, 60)}_${i}`;
+  return out;
+}
+
+/** An upstream URL without userinfo or query values, for people who must not see embedded secrets. */
+export function redactUrl(url: string) {
+  try {
+    const u = new URL(url);
+    u.username = '';
+    u.password = '';
+    for (const k of [...u.searchParams.keys()]) u.searchParams.set(k, '***');
+    return u.toString();
+  } catch {
+    return '(invalid url)';
+  }
+}
 // Deadline on every POST below the SDK (so an SDK timeout bug can't hang us). GET listen streams are untouched.
 const deadlineFetch = (ms: number): typeof fetch => (url, init = {}) => {
   if ((init.method ?? 'GET').toUpperCase() !== 'POST') return baseFetch(url, init);
@@ -56,11 +93,15 @@ export const toolHash = (t: ToolDef) => crypto.createHash('sha256')
 
 export const errText = (e: any) => {
   const c = causeCode(e);
+  const causes = [e?.cause, e?.cause?.cause, e?.cause?.errors?.[0]];
   if (c === 'ESSRF') { // say what was blocked, not just "fetch failed"
-    const m = [e?.cause, e?.cause?.cause, e?.cause?.errors?.[0]].find((x) => x?.code === 'ESSRF')?.message;
+    const m = causes.find((x) => x?.code === 'ESSRF')?.message;
     if (m) return `${m} (blocked: private, loopback or metadata address; ask an admin to allow-list in-cluster hosts)`;
   }
-  return `${String(e?.message ?? e).slice(0, 200)}${c && !String(e?.message).includes(c) ? ` (${c})` : ''}`;
+  const msg = String(e?.message ?? e);
+  // "fetch failed" alone says nothing: add the underlying reason (refused, redirect refused, TLS, DNS…)
+  const why = /fetch failed/.test(msg) ? causes.find((x) => x?.message)?.message : undefined;
+  return `${msg.slice(0, 200)}${why ? `: ${String(why).slice(0, 160)}` : ''}${c && !msg.includes(c) && !String(why).includes(c) ? ` (${c})` : ''}`;
 };
 
 export class UpstreamManager {
@@ -70,7 +111,7 @@ export class UpstreamManager {
 
   /** Load (or re-sync after a missed event) all servers, access rules and pins from the database. */
   async load() {
-    const rows = await q<UpstreamRow>('select id::int as id, slug, name, url, auth_header, credential, enabled, timeout_ms from upstreams order by id');
+    const rows = await q<UpstreamRow>(`select ${UPSTREAM_COLS} from upstreams order by id`);
     const policies = await q<{ upstream_id: number; tool: string; access: Access }>('select upstream_id::int as upstream_id, tool, access from tool_policies');
     const pins = await q<{ upstream_id: number; tool: string; hash: string; description: string | null }>('select upstream_id::int as upstream_id, tool, hash, description from tool_pins');
     // all synchronous from here, so pins are in place before any probe can deliver a tool list
@@ -88,9 +129,26 @@ export class UpstreamManager {
 
   // ---- applying another replica's change (events.ts) ----
   async reloadUpstream(id: number) {
-    const r = await one<UpstreamRow>('select id::int as id, slug, name, url, auth_header, credential, enabled, timeout_ms from upstreams where id = $1', [id]);
-    if (r) this.upsert(r);
-    else this.remove(id);
+    const r = await one<UpstreamRow>(`select ${UPSTREAM_COLS} from upstreams where id = $1`, [id]);
+    if (!r) return this.remove(id);
+    // pins and rules may have been reset with the edit (URL change): take the database's view
+    const pins = await q<{ tool: string; hash: string; description: string | null }>('select tool, hash, description from tool_pins where upstream_id = $1', [id]);
+    const rules = await q<{ tool: string; access: Access }>('select tool, access from tool_policies where upstream_id = $1', [id]);
+    const u = this.upsert(r);
+    u.pins = new Map(pins.map((p) => [p.tool, { hash: p.hash, description: p.description }]));
+    u.access = new Map(rules.map((p) => [p.tool, p.access]));
+    this.recheckPins(u);
+    this.onToolsChanged();
+  }
+
+  /** The admin pointed the server somewhere else: forget the old server's pinned definitions (trust on first use
+   *  applies to the new one). */
+  async resetPins(u: Upstream) {
+    await q('delete from tool_pins where upstream_id = $1', [u.id]);
+    u.pins.clear();
+    u.changed.clear();
+    u.tools = [];
+    this.rebuildNames(u);
   }
   async reloadAccess(id: number, tool: string) {
     const u = this.ups.get(id);
@@ -111,9 +169,35 @@ export class UpstreamManager {
   private recheckPins(u: Upstream) {
     for (const t of u.tools) {
       const pin = u.pins.get(t.name);
-      if (pin && pin.hash !== toolHash(t)) u.changed.add(t.name);
+      if (pin ? pin.hash !== toolHash(t) : u.pins.size > 0) u.changed.add(t.name);
       else u.changed.delete(t.name);
     }
+  }
+
+  private rebuildNames(u: Upstream) {
+    u.exposed = new Map();
+    u.exposedOf = new Map();
+    const taken = new Set<string>();
+    for (const t of u.tools) {
+      const n = safeToolName(t.name, taken);
+      taken.add(n);
+      u.exposed.set(n, t.name);
+      u.exposedOf.set(t.name, n);
+    }
+  }
+
+  /** Resolve a client-facing tool name (without the slug) to the upstream's own tool name. */
+  realName(u: Upstream, exposed: string) {
+    return u.exposed.get(exposed) ?? (u.tools.length === 0 ? exposed : undefined);
+  }
+
+  /** Re-list a server's tools now. With several replicas the admin may act on a definition another replica already
+   *  saw while this one's health loop hasn't re-listed yet. */
+  async refreshTools(u: Upstream) {
+    if (!u.client) return;
+    try {
+      this.setTools(u, (await u.client.listTools(undefined, { timeout: config.probeTimeoutMs, cacheMode: 'bypass' } as any)).tools);
+    } catch { /* the health loop reports the failure */ }
   }
 
   /** An admin accepts a changed tool definition: re-pin it and make the tool available again. */
@@ -146,15 +230,24 @@ export class UpstreamManager {
   upsert(r: UpstreamRow) {
     const old = this.ups.get(r.id);
     const u: Upstream = old ?? {
-      id: r.id, slug: r.slug, name: r.name, url: r.url, authHeader: null, credential: null, enabled: r.enabled, timeoutMs: null,
+      id: r.id, slug: r.slug, name: r.name, url: r.url, authHeader: null, credential: null, enabled: r.enabled, timeoutMs: null, managedBy: null,
       status: 'connecting', era: null, protocolVersion: null, lastError: null, statusSince: new Date(), tools: [], access: new Map(),
-      pins: new Map(), changed: new Set(),
-      strikes: 0, retryMs: 0, busy: false, again: false, removed: false,
+      pins: new Map(), changed: new Set(), exposed: new Map(), exposedOf: new Map(),
+      strikes: 0, retryMs: 0, busy: false, again: false, removed: false, gen: 0,
     };
-    const credential = unseal(r.credential); // stored sealed; plaintext only in this process's memory
-    const reconnect = !old || old.url !== r.url || old.authHeader !== r.auth_header || old.credential !== credential;
-    Object.assign(u, { slug: r.slug, name: r.name, url: r.url, authHeader: r.auth_header, credential, enabled: r.enabled, timeoutMs: r.timeout_ms });
+    // stored sealed; plaintext only in this process's memory. A value we can't decrypt must not crash the gateway or
+    // be sent as garbage: the server shows auth_failed until an admin re-enters the credential.
+    let credential: string | null = null;
+    let credentialError: string | undefined;
+    try {
+      credential = unseal(r.credential);
+    } catch {
+      credentialError = 'stored credential cannot be decrypted (CREDENTIAL_KEY changed?): re-enter it in the dashboard';
+    }
+    const reconnect = !old || old.url !== r.url || old.authHeader !== r.auth_header || old.credential !== credential || old.credentialError !== credentialError;
+    Object.assign(u, { slug: r.slug, name: r.name, url: r.url, authHeader: r.auth_header, credential, credentialError, enabled: r.enabled, timeoutMs: r.timeout_ms, managedBy: r.managed_by ?? null });
     this.ups.set(r.id, u);
+    this.syncManagedHosts();
     if (!u.enabled) {
       clearTimeout(u.timer);
       this.drop(u);
@@ -163,7 +256,13 @@ export class UpstreamManager {
       return u;
     }
     if (reconnect) this.drop(u);
-    if (u.status === 'disabled') this.setStatus(u, 'connecting');
+    if (u.credentialError) {
+      clearTimeout(u.timer);
+      this.setStatus(u, 'auth_failed', new Error(u.credentialError));
+      this.onToolsChanged();
+      return u;
+    }
+    if (u.status === 'disabled' || (reconnect && old)) this.setStatus(u, 'connecting');
     this.kick(u);
     return u;
   }
@@ -175,7 +274,13 @@ export class UpstreamManager {
     clearTimeout(u.timer);
     this.drop(u);
     this.ups.delete(id);
+    this.syncManagedHosts();
     this.onToolsChanged();
+  }
+
+  private syncManagedHosts() {
+    managedHosts.clear();
+    for (const u of this.ups.values()) if (u.managedBy) try { managedHosts.add(new URL(u.url).hostname.toLowerCase()); } catch { /* invalid URL: never allowed */ }
   }
 
   bySlug(slug: string) {
@@ -190,7 +295,7 @@ export class UpstreamManager {
     for (const u of this.ups.values()) {
       const visible = u.status === 'connected' || (u.status === 'unreachable' && now - u.statusSince.getTime() < 15_000);
       if (!u.enabled || !visible) continue;
-      for (const t of u.tools) if (!u.changed.has(t.name)) out.push({ u, t, name: `${u.slug}__${t.name}` });
+      for (const t of u.tools) if (!u.changed.has(t.name)) out.push({ u, t, name: `${u.slug}__${u.exposedOf.get(t.name) ?? t.name}` });
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -210,12 +315,25 @@ export class UpstreamManager {
 
   private drop(u: Upstream) {
     const c = u.client;
+    u.gen++;
     u.client = undefined;
     u.sessionId = undefined;
     c?.close().catch(() => {});
   }
 
-  private async connect(u: Upstream) {
+  /** Connect (or join the connect already running for the current settings). */
+  private connect(u: Upstream): Promise<void> {
+    if (u.connecting && u.connecting.gen === u.gen) return u.connecting.p;
+    const gen = u.gen;
+    const p = this.doConnect(u, gen).finally(() => {
+      if (u.connecting?.p === p) u.connecting = undefined;
+    });
+    u.connecting = { gen, p };
+    return p;
+  }
+
+  private async doConnect(u: Upstream, gen: number) {
+    if (u.credentialError) throw Object.assign(new Error(u.credentialError), { code: 'ECREDENTIAL' });
     const client = new Client({ name: 'urumi-gateway', version: config.version }, { versionNegotiation: { mode: 'auto', probe: { timeoutMs: 5000 } } } as any);
     const headers: Record<string, string> = {};
     if (u.authHeader && u.credential) headers[u.authHeader] = u.credential;
@@ -223,42 +341,53 @@ export class UpstreamManager {
       requestInit: { headers },
       fetch: deadlineFetch(u.timeoutMs ?? config.callTimeoutMs),
     });
-    await client.connect(transport, { timeout: config.probeTimeoutMs });
-    const { tools } = await client.listTools(undefined, { timeout: config.probeTimeoutMs });
-    if (u.removed || !u.enabled) {
+    try {
+      await client.connect(transport, { timeout: config.probeTimeoutMs });
+      const { tools } = await client.listTools(undefined, { timeout: config.probeTimeoutMs });
+      // removed, disabled, or re-pointed (URL/credential edit) while we were connecting: this client is stale
+      if (u.removed || !u.enabled || u.gen !== gen) {
+        client.close().catch(() => {});
+        return;
+      }
+      u.client = client;
+      u.sessionId = transport.sessionId;
+      u.era = client.getDiscoverResult() ? 'modern' : 'legacy';
+      u.protocolVersion = client.getNegotiatedProtocolVersion() ?? null;
+      this.setTools(u, tools);
+      log.info({ upstream: u.slug, era: u.era, version: u.protocolVersion, tools: tools.length }, 'upstream connected');
+    } catch (e) {
       client.close().catch(() => {});
-      return;
+      throw e;
     }
-    u.client = client;
-    u.sessionId = transport.sessionId;
-    u.era = client.getDiscoverResult() ? 'modern' : 'legacy';
-    u.protocolVersion = client.getNegotiatedProtocolVersion() ?? null;
-    this.setTools(u, tools);
-    log.info({ upstream: u.slug, era: u.era, version: u.protocolVersion, tools: tools.length }, 'upstream connected');
   }
 
   private setTools(u: Upstream, tools: ToolDef[]) {
     const before = JSON.stringify(u.tools);
     u.tools = tools;
     if (JSON.stringify(tools) === before) return;
+    this.rebuildNames(u);
     // Trust on first use: the admin who added the server approved what it offered then. A tool whose definition
-    // later changes (description, schema, hints) is quarantined until an admin re-approves it.
+    // later changes (description, schema, hints), or a tool that appears later, is quarantined until an admin
+    // approves it: a server can't slip a new "delete everything" tool in after review.
+    const firstSight = u.pins.size === 0;
     for (const t of tools) {
       const hash = toolHash(t);
       const pin = u.pins.get(t.name);
-      if (!pin) {
+      if (!pin && firstSight) {
         u.pins.set(t.name, { hash, description: t.description ?? null });
         q(`insert into tool_pins(upstream_id, tool, hash, description) values ($1,$2,$3,$4) on conflict do nothing`,
           [u.id, t.name, hash, t.description ?? null]).catch(() => {});
-      } else if (pin.hash !== hash) {
+      } else if (!pin || pin.hash !== hash) {
         if (!u.changed.has(t.name)) {
           u.changed.add(t.name);
-          log.warn({ upstream: u.slug, tool: t.name }, 'tool definition changed: quarantined until an admin approves');
+          const what = pin ? 'changed its definition' : 'appeared after the server was approved';
+          log.warn({ upstream: u.slug, tool: t.name }, `tool ${what}: quarantined until an admin approves`);
           q('insert into upstream_events(upstream_id, status, error) values ($1, $2, $3)',
-            [u.id, 'tool_changed', `tool "${t.name}" changed its definition; hidden until an admin approves it`]).catch(() => {});
+            [u.id, pin ? 'tool_changed' : 'tool_added', `tool "${t.name}" ${what}; hidden until an admin approves it`]).catch(() => {});
         }
       } else u.changed.delete(t.name);
     }
+    for (const name of [...u.changed]) if (!tools.some((t) => t.name === name)) u.changed.delete(name);
     this.onToolsChanged();
   }
 
@@ -332,8 +461,10 @@ export class UpstreamManager {
   /** Forward one tool call. On a 404 for a known session (upstream restarted and lost it) reconnect and retry once. */
   async call(u: Upstream, name: string, args: Record<string, unknown> | undefined, signal: AbortSignal | undefined, attempt = 0): Promise<any> {
     if (!u.client) await this.connect(u);
+    const client = u.client;
+    if (!client) throw Object.assign(new Error(`server "${u.name}" is not connected`), { code: 'ECONNREFUSED' });
     try {
-      return await u.client!.callTool({ name, arguments: args ?? {} }, { timeout: u.timeoutMs ?? config.callTimeoutMs, signal } as any);
+      return await client.callTool({ name, arguments: args ?? {} }, { timeout: u.timeoutMs ?? config.callTimeoutMs, signal } as any);
     } catch (e) {
       if (attempt === 0 && e instanceof SdkHttpError && e.status === 404 && u.sessionId) {
         log.info({ upstream: u.slug }, 'session 404: reconnect and retry once');
