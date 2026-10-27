@@ -11,5 +11,5 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },
-  "dependencies": { "zod": "4.6.5" }
+  "dependencies": { "zod": "4.6.7" }
 }
